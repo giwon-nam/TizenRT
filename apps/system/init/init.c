@@ -79,6 +79,7 @@ extern void iotjs_register_cmds(void);
 #ifdef CONFIG_TASH
 static void tash_register_cmds(void)
 {
+	ble_command_set_tash_cmd_install();
 #if defined(CONFIG_SYSTEM_CMDS)
 	system_register_utilcmds();
 #endif

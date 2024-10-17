@@ -67,6 +67,8 @@ ASRCS =
 CSRCS =
 MAINSRC =
 
+CSRCS += ble_command.c
+
 ifneq ($(CONFIG_DISABLE_ENVIRON),y)
 CSRCS += fs_getpath.c
 endif

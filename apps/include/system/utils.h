@@ -19,6 +19,7 @@
 #define __APPS_INCLUDE_SYSTEM_UTILS_H
 #include <tinyara/config.h>
 
+void ble_command_set_tash_cmd_install(void);
 #ifdef CONFIG_SYSTEM_CMDS
 void system_register_utilcmds(void);
 #endif
