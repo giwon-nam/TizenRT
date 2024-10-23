@@ -617,16 +617,16 @@ static void ble_command_client(int argc, char *argv[])
 
 static void ble_client_print_context(void)
 {
-	BLE_LOG_INFO("BLE client context count : %d", g_client_context_count);
+	BLE_LOG_INFO("BLE client context count : %d\n", g_client_context_count);
 	ble_device_connected_list connected_list = {0};
 	uint8_t mac[BLE_BD_ADDR_MAX_LEN] = {0};
 	if (ble_client_connected_device_list(&connected_list) == BLE_MANAGER_SUCCESS) {
-		BLE_LOG_INFO("Connected devices count : %d", connected_list.connected_count);
+		BLE_LOG_INFO("Connected devices count : %d\n", connected_list.connected_count);
 		for (int i = 0; i < connected_list.connected_count; i++) {
 			if (ble_server_get_mac_addr_by_conn_handle(connected_list.conn_handle[i], mac) == BLE_MANAGER_SUCCESS) {
 				ble_command_print_mac("\tConnected device mac address: ", mac);
 			} else {
-				BLE_LOG_ERROR("Failed to get mac address from conn handle");
+				BLE_LOG_ERROR("Failed to get mac address from conn handle\n");
 			}
 		}
 	}
@@ -634,21 +634,21 @@ static void ble_client_print_context(void)
 	ble_bonded_device_list bonded_list[BLE_MAX_BONDED_DEVICE] = {0};
 	uint16_t bonded_count = 0;
 	if (ble_manager_get_bonded_device(bonded_list, &bonded_count) == BLE_MANAGER_SUCCESS) {
-		BLE_LOG_INFO("Bonded devices count : %d", bonded_count);
+		BLE_LOG_INFO("Bonded devices count : %d\n", bonded_count);
 		for (int i = 0; i < bonded_count; i++) {
 			ble_command_print_mac("\tBonded mac address: ", bonded_list[i].bd_addr.mac);
 		}
 	}
 
 	for (int i = 0; i < g_client_context_count; i++) {
-		BLE_LOG_INFO("BLE client context conn handle : 0x%04x", g_client_contexts[i]->conn_handle);
+		BLE_LOG_INFO("BLE client context conn handle : 0x%04x\n", g_client_contexts[i]->conn_handle);
 		ble_device_connected device_info = {0};
 		if (ble_client_connected_info(g_client_contexts[i], &device_info) == BLE_MANAGER_SUCCESS) {
 			ble_command_print_mac("\tConnected to ", device_info.conn_info.addr.mac);
-			BLE_LOG_INFO("\tBonded : %d", device_info.is_bonded);
+			BLE_LOG_INFO("\tBonded : %d\n", device_info.is_bonded);
 		}
 		ble_client_state_e state = ble_client_get_state(g_client_contexts[i]);
-		BLE_LOG_INFO("\tstate : %d%s", state, (state == BLE_CLIENT_CONNECTED ? "(CONNECTED)" : ""));
+		BLE_LOG_INFO("\tstate : %d%s\n", state, (state == BLE_CLIENT_CONNECTED ? "(CONNECTED)" : ""));
 	}
 
 	// BLE_LOG_INFO("BLE service client state");
