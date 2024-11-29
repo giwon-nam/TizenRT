@@ -72,6 +72,11 @@ player_result_t MediaPlayer::getVolume(uint8_t *vol)
 	return mPMpImpl->getVolume(vol);
 }
 
+player_result_t MediaPlayer::getStreamVolume(uint8_t *vol)
+{
+	return mPMpImpl->getStreamVolume(vol);
+}
+
 player_result_t MediaPlayer::getMaxVolume(uint8_t *vol)
 {
 	return mPMpImpl->getMaxVolume(vol);
@@ -102,7 +107,18 @@ bool MediaPlayer::isPlaying()
 	return mPMpImpl->isPlaying();
 }
 
+player_result_t MediaPlayer::setStreamInfo(std::shared_ptr<stream_info_t> stream_info)
+{
+	return mPMpImpl->setStreamInfo(stream_info);
+}
+
+player_result_t MediaPlayer::setLooping(bool loop)
+{
+	return mPMpImpl->setLooping(loop);
+}
+
 MediaPlayer::~MediaPlayer()
 {
 }
 } // namespace media
+
