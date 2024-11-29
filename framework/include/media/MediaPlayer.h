@@ -43,7 +43,9 @@ namespace media {
  */
 enum player_error_e : int {
 	/** MediaPlayer Error case */
-	PLAYER_ERROR_NOT_ALIVE = -8,
+	PLAYER_ERROR_NOT_ALIVE = -10,
+	PLAYER_ERROR_FOCUS_NOT_READY,
+	PLAYER_ERROR_PLAYBACK_FINISHED,
 	PLAYER_ERROR_INVALID_STATE,
 	PLAYER_ERROR_INVALID_OPERATION,
 	PLAYER_ERROR_INVALID_PARAMETER,
@@ -228,9 +230,36 @@ public:
 	 * @since TizenRT v2.1 PRE
 	 */
 	bool isPlaying();
+
+	/**
+	 * @brief set stream_info of MediaPlayer
+	 * @details @b #include <media/MediaPlayer.h>
+	 * This function is a synchronous API
+	 * param[in] stream_info shared_ptr of stream_info_t
+	 * @return The result of the setStreamInfo operation
+	 */
+	player_result_t setStreamInfo(std::shared_ptr<stream_info_t> stream_info);
+
+	/**
+	 * @brief Set Playback to be looping or non-looping
+	 * @details @b #include <media/MediaPlayer.h>
+	 * This function is a synchronous API
+	 * @return true if looping is set properly
+	 * @since TizenRT v5.0
+	 */
+	player_result_t setLooping(bool loop);
+
 private:
 	std::shared_ptr<MediaPlayerImpl> mPMpImpl;
 	uint64_t mId;
+
+	/**
+	 * @brief Get the current set volume of player stream type
+	 * @details @b #include <media/MediaPlayer.h>
+	 * This function is a synchronous API
+	 * @return The current set volume of player stream type
+	 */
+	player_result_t getStreamVolume(uint8_t *volume);
 };
 } // namespace media
 #endif

@@ -211,7 +211,8 @@
 
 static serial_t* sdrv[MAX_UART_INDEX + 1] = {NULL, NULL, NULL, NULL, NULL}; //uart 0~4, uart4 is configured as log uart
 #ifdef CONFIG_PM
-static bool uart_active_state = 0;
+static volatile bool uart_active_state = 0;
+static volatile bool log_uart_active_state = 0;
 #endif
 
 struct rtl8730e_up_dev_s {
@@ -562,14 +563,25 @@ static void rtl8730e_log_up_shutdown(struct uart_dev_s *dev)
 
 static int rtl8730e_log_uart_irq(void *Data)
 {
-	uart_recvchars(&CONSOLE_DEV);
+
+	u32 IrqEn = LOGUART_GetIMR();
+	u32 reg_lsr = LOGUART_GetStatus(CONSOLE);
+
+	if (reg_lsr & LOGUART_BIT_RXFIFO_INT) {
+		uart_recvchars(&CONSOLE_DEV);
+	}
+
+	u32 txempty_en = LOGUART_GET_ETPFEI(IrqEn);
+	if ((txempty_en == 0x4 && (reg_lsr & LOGUART_BIT_TP4F_EMPTY)) || (reg_lsr & LOGUART_BIT_TP4F_NOT_FULL)) {
+		uart_xmitchars(&CONSOLE_DEV);
+	}
 	return 0;
 }
 
 static int rtl8730e_log_up_attach(struct uart_dev_s *dev)
 {
-	InterruptRegister((IRQ_FUN)rtl8730e_log_uart_irq, RTL8730E_UART_LOG_IRQ-32, (int)NULL, INT_PRI_MIDDLE);
-	InterruptEn(RTL8730E_UART_LOG_IRQ-32, INT_PRI_MIDDLE);
+	InterruptRegister((IRQ_FUN)rtl8730e_log_uart_irq, RTL8730E_UART_LOG_IRQ-32, (int)NULL, INT_PRI_LOWEST);
+	InterruptEn(RTL8730E_UART_LOG_IRQ-32, INT_PRI_LOWEST);
 	return 0;
 }
 
@@ -756,12 +768,21 @@ static void rtl8730e_log_up_txint(struct uart_dev_s *dev, bool enable)
 	struct rtl8730e_up_dev_s *priv = (struct rtl8730e_up_dev_s *)dev->priv;
 	DEBUGASSERT(priv);
 	priv->txint_enable = enable;
-
-	if (enable)
-		uart_xmitchars(dev);
+#ifdef CONFIG_PM
+	irqstate_t flags = enter_critical_section();
+	if (log_uart_active_state != enable) {	/* State has changed */
+		bsp_pm_domain_control(BSP_UART_DRV, enable);
+		log_uart_active_state = enable;
+	}
+	leave_critical_section(flags);
+#endif
+	if (enable) {
+		LOGUART_INTConfig(LOGUART_DEV, LOGUART_TX_EMPTY_PATH_4_INTR, ENABLE);
 		//LOGUART_RxCmd(LOGUART_DEV, ENABLE);
-	//else
+	} else {
+		LOGUART_INTConfig(LOGUART_DEV, LOGUART_TX_EMPTY_PATH_4_INTR, DISABLE);
 		//LOGUART_RxCmd(LOGUART_DEV, DISABLE);
+	}
 }
 
 /****************************************************************************
@@ -777,11 +798,10 @@ static bool rtl8730e_log_up_txready(struct uart_dev_s *dev)
 	struct rtl8730e_up_dev_s *priv = (struct rtl8730e_up_dev_s *)dev->priv;
 	DEBUGASSERT(priv);
 
-	//LOGUART_TypeDef *UARTLOG = LOGUART_DEV;
-	//return (UARTLOG->LOGUART_UART_LSR & LOG_UART_IDX_FLAG[2].not_full);
-	return 1;
+	 return (LOGUART_Ready());
 
 }
+
 
 /****************************************************************************
  * Name: up_txempty
@@ -796,9 +816,8 @@ static bool rtl8730e_log_up_txempty(struct uart_dev_s *dev)
 	struct rtl8730e_up_dev_s *priv = (struct rtl8730e_up_dev_s *)dev->priv;
 	DEBUGASSERT(priv);
 
-	// LOGUART_TypeDef *UARTLOG = LOGUART_DEV;
-	// return (UARTLOG->LOGUART_UART_LSR & LOG_UART_IDX_FLAG[2].empty);
-	return 1;
+	u32 reg_lsr = LOGUART_GetStatus(CONSOLE);
+	return (reg_lsr & LOGUART_BIT_TP4F_EMPTY);
 }
 
 
@@ -821,8 +840,8 @@ static int rtl8730e_up_setup(struct uart_dev_s *dev)
 	if (uart_index_get(priv->tx) == 4)	{//Loguart cannot be stopped
 		irq_disable(RTL8730E_UART_LOG_IRQ-32);
 		irq_unregister(RTL8730E_UART_LOG_IRQ-32);
-		InterruptRegister((IRQ_FUN)rtl8730e_log_uart_irq, RTL8730E_UART_LOG_IRQ-32, (int)NULL, INT_PRI_MIDDLE);
-		InterruptEn(RTL8730E_UART_LOG_IRQ-32, INT_PRI_MIDDLE);
+		InterruptRegister((IRQ_FUN)rtl8730e_log_uart_irq, RTL8730E_UART_LOG_IRQ-32, (int)NULL, INT_PRI_LOWEST);
+		InterruptEn(RTL8730E_UART_LOG_IRQ-32, INT_PRI_LOWEST);
 	} else {
 		sdrv[uart_index_get(priv->tx)]->uart_idx = uart_index_get(priv->tx);
 		serial_init((serial_t *) sdrv[uart_index_get(priv->tx)], priv->tx, priv->rx);
@@ -1101,10 +1120,12 @@ static void rtl8730e_up_txint(struct uart_dev_s *dev, bool enable)
 	DEBUGASSERT(priv);
 	priv->txint_enable = enable;
 #ifdef CONFIG_PM
+	irqstate_t flags = enter_critical_section();
 	if (uart_active_state != enable) {	/* State has changed */
 		bsp_pm_domain_control(BSP_UART_DRV, enable);
 		uart_active_state = enable;
 	}
+	leave_critical_section(flags);
 #endif
 	serial_irq_set(sdrv[uart_index_get(priv->tx)], TxIrq, enable);
 	if (enable)
@@ -1294,9 +1315,10 @@ int up_lowgetc(void)
 {
 	uint8_t rxd;
 #ifdef CONFIG_UART4_SERIAL_CONSOLE
+	u32 IrqEn = LOGUART_GetIMR();
 	LOGUART_SetIMR(0);
-	rxd = LOGUART_GetChar(_TRUE);
-	LOGUART_SetIMR(1);
+	rxd = LOGUART_GetChar(_FALSE);
+	LOGUART_SetIMR(IrqEn);
 #else
 	if (CONSOLE_DEV.isconsole == false)
 		return;
@@ -1320,6 +1342,8 @@ int up_lowgetc(void)
  ****************************************************************************/
 int up_putc(int ch)
 {
+	/*check if there is space in fifo*/
+	while(!LOGUART_Ready());
 	/* Check for LF */
 
 	if (ch == '\n') {
@@ -1368,6 +1392,8 @@ int up_getc(void)
  ****************************************************************************/
 int up_putc(int ch)
 {
+	/*check if there is space in fifo*/
+	while(!LOGUART_Ready());
 	/* Check for LF */
 
 	if (ch == '\n') {

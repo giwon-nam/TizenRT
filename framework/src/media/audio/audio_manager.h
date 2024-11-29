@@ -98,7 +98,8 @@ enum audio_device_process_unit_subtype_e {
 	AUDIO_DEVICE_SPEECH_DETECT_LOCAL4 = 9,
 	AUDIO_DEVICE_SPEECH_DETECT_LOCAL5 = 10,
 	AUDIO_DEVICE_SPEECH_DETECT_LOCAL6 = 11,
-	AUDIO_DEVICE_SPEECH_DETECT_LOCAL7 = 12
+	AUDIO_DEVICE_SPEECH_DETECT_LOCAL7 = 12,
+	AUDIO_DEVICE_SPEECH_DETECT_AEC = 13
 };
 
 typedef enum audio_device_process_unit_subtype_e device_process_subtype_t;
@@ -148,11 +149,12 @@ audio_manager_result_t set_audio_stream_in(unsigned int channels, unsigned int s
  *   channels: number of channels
  *   sample_rate: sample rate with which the stream is operated
  *   format: audio file format to be streamed out
+ *   stream_id: stream info id to be used for stream out
  *
  * Return Value:
  *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
  ****************************************************************************/
-audio_manager_result_t set_audio_stream_out(unsigned int channels, unsigned int sample_rate, int format);
+audio_manager_result_t set_audio_stream_out(unsigned int channels, unsigned int sample_rate, int format, stream_info_id_t stream_id);
 
 /****************************************************************************
  * Name: start_audio_stream_in
@@ -240,7 +242,7 @@ audio_manager_result_t stop_audio_stream_in(void);
  * Return Value:
  *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
  ****************************************************************************/
-audio_manager_result_t stop_audio_stream_out(void);
+audio_manager_result_t stop_audio_stream_out(bool drain);
 
 /****************************************************************************
  * Name: reset_audio_stream_in
@@ -249,6 +251,9 @@ audio_manager_result_t stop_audio_stream_out(void);
  *   Close the active input audio stream.
  *   After the reset, the stream should be restarted from the beginning with
  *   calling set_audio_stream_in().
+ *
+ * Input parameter:
+ *   drain: If true Drain pcm data before stop, otherwise drop
  *
  * Return Value:
  *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
@@ -266,7 +271,7 @@ audio_manager_result_t reset_audio_stream_in(void);
  * Return Value:
  *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
  ****************************************************************************/
-audio_manager_result_t reset_audio_stream_out(void);
+audio_manager_result_t reset_audio_stream_out(stream_info_id_t stream_id);
 
 /****************************************************************************
  * Name: get_input_frame_count
@@ -442,6 +447,21 @@ audio_manager_result_t get_input_audio_gain(uint8_t *gain);
 audio_manager_result_t get_output_audio_volume(uint8_t *volume);
 
 /****************************************************************************
+ * Name: get_output_stream_volume
+ *
+ * Description:
+ *   Get current volume level set for the given stream info.
+ *
+ * Input parameter:
+ *   volume: the pointer to get the current volume value
+ *   stream_info: pointer to structure containing stream information
+ *
+ * Return Value:
+ *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
+ ****************************************************************************/
+audio_manager_result_t get_output_stream_volume(uint8_t *volume, stream_info_t *stream_info);
+
+/****************************************************************************
  * Name: set_input_audio_gain
  *
  * Description:
@@ -460,14 +480,58 @@ audio_manager_result_t set_input_audio_gain(uint8_t gain);
  *
  * Description:
  *   Adjust the volume level of the active output audio device.
+ *   Also, updates volume level in the json corresponding to input stream info.
  *
  * Input parameter:
  *   volume: volume value to set, Min = 0, Max = get_max_audio_volume()
+ * 	 stream_info: pointer to structure containing stream information
  *
  * Return Value:
  *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
  ****************************************************************************/
-audio_manager_result_t set_output_audio_volume(uint8_t volume);
+audio_manager_result_t set_output_audio_volume(uint8_t volume, stream_info_t *stream_info);
+
+/****************************************************************************
+ * Name: set_output_stream_volume
+ *
+ * Description:
+ *   Adjust the volume level of the active output audio device based on the stream policy type.
+ *
+ * Input parameter:
+ *   stream_info: pointer to structure containing stream information
+ *
+ * Return Value:
+ *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
+ ****************************************************************************/
+audio_manager_result_t set_output_stream_volume(stream_info_t *stream_info);
+
+/****************************************************************************
+ * Name: set_output_audio_equalizer
+ *
+ * Description:
+ *   Sets the audio equalizer preset for the active output audio device.
+ *
+ * Input parameter:
+ *   preset: The preset number to apply to the audio equalizer.
+ *
+ * Return Value:
+ *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
+ ****************************************************************************/
+audio_manager_result_t set_output_audio_equalizer(uint32_t preset);
+
+/****************************************************************************
+ * Name: set_input_audio_equalizer
+ *
+ * Description:
+ *   Sets the audio equalizer preset for the active input audio device.
+ *
+ * Input parameter:
+ *   preset: The preset number to apply to the audio equalizer.
+ *
+ * Return Value:
+ *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
+ ****************************************************************************/
+audio_manager_result_t set_input_audio_equalizer(uint32_t preset);
 
 /****************************************************************************
  * Name: find_stream_in_device_with_process_type

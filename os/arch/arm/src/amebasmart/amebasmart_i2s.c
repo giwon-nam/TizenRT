@@ -119,8 +119,12 @@
 
 #define OVER_SAMPLE_RATE (384U)
 
-#define I2S_DMA_PAGE_SIZE 16384	/* 4 ~ 16384, set to a factor of APB size */
-#define I2S_DMA_PAGE_NUM 2	/* Vaild number is 2~4 */
+#define I2S_DMA_PAGE_SIZE 4096 	/* 4 ~ 16384, set to a factor of APB size */
+#define I2S_DMA_PAGE_NUM 4	/* Vaild number is 2~4 */
+
+#ifdef CONFIG_PM
+static volatile bool i2s_lock_state = 0;
+#endif
 
 struct amebasmart_buffer_s {
 	struct amebasmart_buffer_s *flink; /* Supports a singly linked list */
@@ -387,9 +391,6 @@ static int amebasmart_i2s_tx(struct amebasmart_i2s_s *priv, struct amebasmart_bu
 	int *ptx_buf;
 	int tx_size;
 
-#ifdef CONFIG_PM
-	bsp_pm_domain_control(BSP_I2S_DRV, 1);
-#endif
 	tx_size = I2S_DMA_PAGE_SIZE; /* Track current byte size to increment by */
 	struct ap_buffer_s *apb;
 	if (NULL != bfcontainer && NULL != bfcontainer->apb) {
@@ -402,6 +403,7 @@ static int amebasmart_i2s_tx(struct amebasmart_i2s_s *priv, struct amebasmart_bu
 							/* Start sending first page, after that the txdma callback will be called in the tx irq handler */
 		while ((priv->apb_tx->nbytes - priv->apb_tx->curbyte) > 0) {
 			ptx_buf = i2s_get_tx_page(priv->i2s_object);
+			i2s_enable(priv->i2s_object);
 			if (ptx_buf) {
 				if ((apb->nbytes - apb->curbyte) <= tx_size) {
 					tx_size = apb->nbytes - apb->curbyte;
@@ -412,7 +414,7 @@ static int amebasmart_i2s_tx(struct amebasmart_i2s_s *priv, struct amebasmart_bu
 				}
 				apb->curbyte += tx_size; /* No padding, ptx_buf is big enough to fill the whole tx_size */
 
-				i2s_enable(priv->i2s_object);
+				
 				i2s_send_page(priv->i2s_object, (uint32_t *)ptx_buf);
 			} else {
 				break;
@@ -423,9 +425,6 @@ static int amebasmart_i2s_tx(struct amebasmart_i2s_s *priv, struct amebasmart_bu
 		ret = -1;
 		i2serr("ERROR: bfcontainer or bfcontainer->apb is NULL\n");
 	}
-#ifdef CONFIG_PM
-	bsp_pm_domain_control(BSP_I2S_DRV, 0);
-#endif
 	return ret;
 }
 
@@ -557,6 +556,8 @@ static void i2s_tx_schedule(struct amebasmart_i2s_s *priv, int result)
 
 		/* Start next transfer */
 		amebasmart_i2s_tx(priv, bfcontainer);
+	} else if ((priv->apb_tx->nbytes - priv->apb_tx->curbyte) <= 0) {
+		ameba_i2s_pause(priv->i2s_object);
 	}
 
 	/* If the worker has completed running, then reschedule the working thread.
@@ -652,8 +653,13 @@ static int i2s_send(struct i2s_dev_s *dev, struct ap_buffer_s *apb, i2s_callback
 	struct amebasmart_i2s_s *priv = (struct amebasmart_i2s_s *)dev;
 
 	DEBUGASSERT(priv && apb);
-
-	// i2sinfo("[I2S TX] apb=%p nbytes=%d samp=%p arg=%p timeout=%d\n", apb, apb->nbytes - apb->curbyte, apb->samp, arg, timeout);
+#ifdef CONFIG_PM
+	if (!i2s_lock_state) {
+		i2s_lock_state = 1;
+		bsp_pm_domain_control(BSP_I2S_DRV, 1);
+	}
+#endif
+	i2sinfo("[I2S TX] apb=%p nbytes=%d samp=%p arg=%p timeout=%d\n", apb, apb->nbytes - apb->curbyte, apb->samp, arg, timeout);
 	i2s_dump_buffer("Sending", &apb->samp[apb->curbyte], apb->nbytes - apb->curbyte);
 #if defined(I2S_HAVE_TX) && (0 < I2S_HAVE_TX)
 	
@@ -715,9 +721,6 @@ void i2s_transfer_tx_handleirq(void *data, char *pbuf)
 	struct amebasmart_i2s_s *priv = (struct amebasmart_i2s_s *)data;
 	int tx_size;
 
-#ifdef CONFIG_PM
-	bsp_pm_domain_control(BSP_I2S_DRV, 1);
-#endif
 	tx_size = I2S_DMA_PAGE_SIZE;							   /* Track current byte size to increment by */
 	if ((priv->apb_tx->nbytes - priv->apb_tx->curbyte) <= 0) { /* Condition to stop sending if all data in the buffer has been sent */
 		int result = OK;
@@ -741,9 +744,6 @@ void i2s_transfer_tx_handleirq(void *data, char *pbuf)
 			}
 		}
 	}
-#ifdef CONFIG_PM
-	bsp_pm_domain_control(BSP_I2S_DRV, 0);
-#endif
 }
 
 #if defined(I2S_HAVE_RX) && (0 < I2S_HAVE_RX)
@@ -1519,6 +1519,14 @@ static int i2s_stop(struct i2s_dev_s *dev, i2s_ch_dir_t dir)
 			leave_critical_section(flags);
 			i2s_buf_tx_free(priv, bfcontainer);
 		}
+		i2s_set_dma_buffer(priv->i2s_object, (char *)priv->i2s_tx_buf, NULL, I2S_DMA_PAGE_NUM, I2S_DMA_PAGE_SIZE); /* Allocate DMA Buffer for TX */
+		amebasmart_i2s_isr_initialize(priv);
+#ifdef CONFIG_PM
+	if (i2s_lock_state) {
+		i2s_lock_state = 0;
+		bsp_pm_domain_control(BSP_I2S_DRV, 0);
+	}
+#endif
 	}
 #endif
 

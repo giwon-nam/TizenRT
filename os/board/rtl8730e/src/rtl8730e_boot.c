@@ -240,6 +240,8 @@ void board_gpio_initialize(void)
 		u32 pinpull;
 	} pins[] = {
 				{PA_23, PIN_INPUT, PullNone},
+				/* PB_20 is gpio pin number for LED */
+				{PB_20, PIN_OUTPUT, PullDown},
 		/* NOTE: Do not open pins not for GPIO usage. E.g uart,SPI pins
 		Loguart pins
 		*/
@@ -430,6 +432,7 @@ void board_initialize(void)
 #ifdef CONFIG_AMEBASMART_USBDEVICE
 	usb_initialize();
 #endif
+	rtl8730e_km4_logtask_initialize();
 
 	/* init console */
 #ifndef CONFIG_PLATFORM_TIZENRT_OS
@@ -447,6 +450,10 @@ void board_initialize(void)
 
 #if defined(CONFIG_LCD_ST7785) || defined(CONFIG_LCD_ST7701) || defined(CONFIG_LCD_ST7701SN)
 	rtl8730e_lcdc_initialize();
+#endif
+
+#if defined(CONFIG_TOUCH_IST415)
+	rtl8730e_ist415_initialize();
 #endif
 
 #ifdef CONFIG_WATCHDOG

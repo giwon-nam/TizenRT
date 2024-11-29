@@ -43,6 +43,7 @@ using namespace media::stream;
 #define DEFAULT_SAMPLERATE_TYPE AUDIO_SAMPLE_RATE_24000
 #define DEFAULT_FORMAT_TYPE AUDIO_FORMAT_TYPE_S16_LE
 #define DEFAULT_CHANNEL_NUM 1 //mono
+#define DEFAULT_VOLUME 7
 
 //***************************************************************************
 // class : SoundPlayer
@@ -53,8 +54,8 @@ class SoundPlayer : public MediaPlayerObserverInterface,
 					  public enable_shared_from_this<SoundPlayer>
 {
 public:
-	SoundPlayer() : volume(0), mNumContents(0), mPlayIndex(-1), mHasFocus(false), mSampleRate(DEFAULT_SAMPLERATE_TYPE), \
-						mPaused(false), mIsPlaying(false), mStopped(false), mTrackFinished(false) {};
+	SoundPlayer() : mNumContents(0), mPlayIndex(-1), mHasFocus(false), mSampleRate(DEFAULT_SAMPLERATE_TYPE), \
+						mPaused(false), mIsPlaying(false), mStopped(false), mTrackFinished(false), mVolume(DEFAULT_VOLUME) {};
 	~SoundPlayer() {};
 	bool init(char *argv[]);
 	player_result_t startPlayback(void);
@@ -73,7 +74,6 @@ public:
 
 private:
 	MediaPlayer mp;
-	uint8_t volume;
 	shared_ptr<FocusRequest> mFocusRequest;
 	vector<string> mList;
 	unsigned int mNumContents;
@@ -84,6 +84,7 @@ private:
 	bool mIsPlaying;
 	bool mTrackFinished;
 	unsigned int mSampleRate;
+	uint8_t mVolume;
 	void loadContents(const char *path);
 };
 
@@ -101,6 +102,8 @@ void SoundPlayer::onPlaybackFinished(MediaPlayer &mediaPlayer)
 	printf("onPlaybackFinished playback index : %d player : %x\n", mPlayIndex, &mp);
 	mPlayIndex++;
 	mIsPlaying = false;
+	mPaused = false;
+	mStopped = true;
 	if (mPlayIndex == mNumContents) {
 		mTrackFinished = true;
 		printf("All Track played, Destroy Player\n");
@@ -166,6 +169,7 @@ void SoundPlayer::onPlaybackStopped(MediaPlayer &mediaPlayer)
 	mStopped = true;
 	mIsPlaying = false;
 	mPaused = false;
+	mp.unprepare();
 }
 
 void SoundPlayer::onAsyncPrepared(MediaPlayer &mediaPlayer, player_error_t error)
@@ -182,15 +186,18 @@ void SoundPlayer::onFocusChange(int focusChange)
 {
 	player_result_t res;
 	printf("onFousChange player : %x focus : %d isPlaying : %d mPaused : %d\n", &mp, focusChange, mIsPlaying, mPaused);
+	/* TODO TRANSIENT option is not ready but will be supported soon */
 	switch (focusChange) {
 	case FOCUS_GAIN:
+	case FOCUS_GAIN_TRANSIENT:
 		mHasFocus = true;
 		if (mPaused) {
+			printf("it was paused, just start playback now\n");
 			res = mp.start();
 			if (res != PLAYER_OK) {
 				printf("start failed res : %d\n", res);
 			}
-		} else if (!mStopped) { /* Stop case app should start mediaplayer manually */
+		} else {
 			res = startPlayback();
 			if (res != PLAYER_OK) {
 				printf("startPlayback failed res : %d\n", res);
@@ -199,8 +206,12 @@ void SoundPlayer::onFocusChange(int focusChange)
 		break;
 	case FOCUS_LOSS:
 		mHasFocus = false;
+		mp.stop();
+		break;
+	case FOCUS_LOSS_TRANSIENT:
+		mHasFocus = false;
 		if (mIsPlaying) {
-			mp.pause();
+			mp.pause(); //it will be played again
 		}
 		break;
 	default:
@@ -241,19 +252,16 @@ bool SoundPlayer::init(char *argv[])
 	}
 	mp.setObserver(shared_from_this());
 
-	volume = atoi(argv[2]);
-	uint8_t cur_vol;
-	mp.getVolume(&cur_vol);
-	printf("Current volume : %d new Volume : %d\n", cur_vol, volume);
-	mp.setVolume(volume);
+	mVolume = atoi(argv[2]);
 	stream_info_t *info;
-	stream_info_create(STREAM_TYPE_MEDIA, &info);
+	stream_info_create((stream_policy_t)(atoi(argv[4])), &info);
 	auto deleter = [](stream_info_t *ptr) { stream_info_destroy(ptr); };
 	auto stream_info = std::shared_ptr<stream_info_t>(info, deleter);
 	mFocusRequest = FocusRequest::Builder()
 						.setStreamInfo(stream_info)
 						.setFocusChangeListener(shared_from_this())
 						.build();
+	mp.setStreamInfo(stream_info);
 
 	mSampleRate = atoi(argv[3]);
 	mTrackFinished = false;
@@ -270,7 +278,6 @@ player_result_t SoundPlayer::startPlayback(void)
 	player_result_t res = PLAYER_OK;
 	string s = mList.at(mPlayIndex);
 	printf("startPlayback... playIndex : %d path : %s\n", mPlayIndex, s.c_str());
-	usleep(200000); //add some delay to prevent playback immediately in focus gain state
 	auto source = std::move(unique_ptr<FileInputDataSource>(new FileInputDataSource((const string)s)));
 	source->setSampleRate(mSampleRate);
 	source->setChannels(DEFAULT_CHANNEL_NUM);
@@ -285,6 +292,12 @@ player_result_t SoundPlayer::startPlayback(void)
 	if (res != PLAYER_OK) {
 		printf("prepare failed res : %d\n", res);
 		return res;
+	}
+	uint8_t curVolume = 0;
+	mp.getVolume(&curVolume);
+	printf("Current volume : %d new Volume : %d\n", curVolume, mVolume);
+	if (curVolume != mVolume) {
+		mp.setVolume(mVolume);
 	}
 	res = mp.start();
 	if (res != PLAYER_OK) {
@@ -333,11 +346,45 @@ bool SoundPlayer::checkTrackFinished(void)
 }
 
 extern "C" {
+/*
+ This is guide to use MediaPlayer with focus request.
+ As MediaPlayer is updated and now without focus request, MediaPlayer can't use audio device!!!
+
+ Steps to follow to play an audio data are as follows:
+
+ 1) Application to create a listener to receive onFocusChange callback. Application needs to implement FocusChangeListener interface.
+ 2) Sample source code to create a FocusRequest object and requestFocus is as follows:
+	stream_info_t *info;
+	stream_info_create(STREAM_TYPE_BIXBY, &info); //refer to stream_policy_e for various stream types
+	auto deleter = [](stream_info_t *ptr) { stream_info_destroy(ptr); };
+	auto stream_info = std::shared_ptr<stream_info_t>(info, deleter);
+	mFocusRequest = FocusRequest::Builder()
+						.setStreamInfo(stream_info)
+						.setFocusChangeListener(mFocusObserver)
+						.build();
+	mp.setStreamInfo(stream_info);
+	auto &focusManager = FocusManager::getFocusManager();
+	focusManager.requestFocus(mFocusRequest);
+3)  Application should handle onFocusChange for FOCUS_LOSS during playback. Application must pause/stop playaback when FOCUS_LOSS / FOCUS_LOSS_TRANSIENT recevied
+4)  When playback finsihes, application must call abandonFocus to release focus.
+5)  Mandatory condition, requestFocus must be done and onFocusChange with FOCUS_GAIN options received before calling mediaplayer.prepare
+6)  Sequence of MediaPlayer API calls are as follows:
+	mp.create();
+	mp.setObserver(mMediaPlayerObserverInterface);
+	mp.setStreamInfo(stream_info);
+	mp.setDataSource(source);
+	mp.prepare();
+	mp.start();
+	mp.stop();/mp.pause();
+	mp.unprepare();
+	mp.destroy();
+*/
 int soundplayer_main(int argc, char *argv[])
 {
 	auto player = std::shared_ptr<SoundPlayer>(new SoundPlayer());
 	printf("cur SoundPlayer : %x\n", &player);
-	if (argc != 4) {
+
+	if (argc != 5) {
 		printf("invalid input\n");
 		return -1;
 	}

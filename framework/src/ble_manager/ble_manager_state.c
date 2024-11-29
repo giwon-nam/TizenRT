@@ -249,8 +249,6 @@ ble_result_e blemgr_handle_request(blemgr_msg_s *msg)
 	} break;
 
 	case BLE_CMD_GET_MAC: {
-		BLE_STATE_CHECK;
-
 		uint8_t *mac = (uint8_t *)msg->param;
 		if (mac == NULL) {
 			ret = TRBLE_INVALID_ARGS;
@@ -305,6 +303,15 @@ ble_result_e blemgr_handle_request(blemgr_msg_s *msg)
 	} break;
 
 	// Scanner
+	case BLE_CMD_SET_SCAN: {
+		BLE_STATE_CHECK;
+		blemgr_msg_params *param = (blemgr_msg_params *)msg->param;
+		uint16_t scan_interval = *(uint16_t *)param->param[0];
+		uint16_t scan_window = *(uint16_t *)param->param[1];
+		trble_scan_type scan_type = *(trble_adv_type_e *)param->param[2];
+		ret = ble_drv_set_scan(scan_interval, scan_window, scan_type);
+	} break;
+
 	case BLE_CMD_START_SCAN: {
 		BLE_STATE_CHECK;
 

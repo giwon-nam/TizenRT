@@ -101,11 +101,13 @@ public:
 	player_result_t stop();
 
 	player_result_t getVolume(uint8_t *vol);
+	player_result_t getStreamVolume(uint8_t *vol);
 	player_result_t getMaxVolume(uint8_t *vol);
 	player_result_t setVolume(uint8_t vol);
 
 	player_result_t setDataSource(std::unique_ptr<stream::InputDataSource>);
 	player_result_t setObserver(std::shared_ptr<MediaPlayerObserverInterface>);
+	player_result_t setStreamInfo(std::shared_ptr<stream_info_t> stream_info);
 
 	player_state_t getState();
 	bool isPlaying();
@@ -114,6 +116,7 @@ public:
 	void notifyObserver(player_observer_command_t cmd, ...);
 	void notifyAsync(player_event_t event);
 	void playback();
+	player_result_t setLooping(bool loop);
 
 private:
 	void createPlayer(player_result_t &ret);
@@ -123,17 +126,22 @@ private:
 	void unpreparePlayer(player_result_t &ret);
 	void startPlayer();
 	void stopPlayer(player_result_t ret);
-	player_result_t stopPlayback();
+	player_result_t stopPlayback(bool drain);
 	void pausePlayer();
 	void getPlayerVolume(uint8_t *vol, player_result_t &ret);
+	void getPlayerStreamVolume(uint8_t *vol, player_result_t &ret);
 	void getPlayerMaxVolume(uint8_t *vol, player_result_t &ret);
 	void setPlayerVolume(uint8_t vol, player_result_t &ret);
 	void setPlayerObserver(std::shared_ptr<MediaPlayerObserverInterface> observer);
 	void setPlayerDataSource(std::shared_ptr<stream::InputDataSource> dataSource, player_result_t &ret);
+	void setPlayerStreamInfo(std::shared_ptr<stream_info_t> stream_info, player_result_t &ret);
+	stream_focus_state_t getStreamFocusState(void);
+	void setPlayerLooping(bool loop, player_result_t &ret);
 
 private:
 	MediaPlayer &mPlayer;
 	std::atomic<player_state_t> mCurState;
+	std::atomic<bool> mPlaybackFinished;
 	unsigned char *mBuffer;
 	int mBufSize;
 	std::mutex mCmdMtx;
