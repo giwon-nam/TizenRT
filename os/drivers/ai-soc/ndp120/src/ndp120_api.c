@@ -87,6 +87,9 @@
 #define FF_ID NDP120_DSP_DATA_FLOW_FUNCTION_FULL_FF_49
 #define KEYWORD_NETWORK_ID 0
 
+/* Periodicity of NDP alivness check thread */
+#define NDP_ALIVENESS_CHECK_PERIOD (3000)
+
 /****************************************************************************
  * Private Data
  ****************************************************************************/
@@ -115,6 +118,11 @@ static struct work_s ndp120_work;
 
 /* only used for debugging purposes */
 static struct ndp120_dev_s *_ndp_debug_handle = NULL;
+
+/****************************************************************************
+ * Function Prototypes
+ ****************************************************************************/
+int ndp120_init(struct ndp120_dev_s *dev, bool reinit);
 
 static int check_status(char *message, int s)
 {
@@ -379,6 +387,9 @@ static int initialize_ndp(struct ndp120_dev_s *dev)
 	iif.udelay = iif_udelay;
 
 	dev->ndp_interrupts_enabled = false;
+
+	int full_speed_freq = dev->lower->spi_config.freq;
+	dev->lower->spi_config.freq = NDP120_SPI_FREQ_INIT;
 
 	/*
 	 * initialize the ILib with the integration interface functions and
@@ -956,18 +967,41 @@ check_firmware_aliveness(struct ndp120_dev_s *dev, uint32_t wait_period_ms)
 			state == SYNTIANT_NDP_DSP_FW_ALIVE ?
 				"MCU FW Dead and DSP FW Alive" :
 				"MCU and DSP FW Dead");
+
+		dev->alive = false;
+
+		/* At this point the device is dead, so lets start recovery
+		 * First, turn off interrupts, as init will need interrupts
+		 * to be off, then wait for devsem. We need not worry about
+		 * interrupts from NDP after this*/
+		dev->lower->irq_enable(false);
+
+		s = syntiant_ndp_uninit(&dev->ndp, false, SYNTIANT_NDP_INIT_MODE_RESET);
+		audvdbg("uninit : %d\n", s);
+
+		dev->lower->reset();
+
+		s = ndp120_init(dev, true);
+
+		if (s) {
+			/* For now do nothing, there may be some cases where init might
+			 * have failed due to no memory, so retry after some time */
+			auddbg("reinit failed!\n");
+		} else {
+			/* re enable interrupts */
+			dev->lower->irq_enable(true);
+		}
 	}
 
 out:
 	return s;
 }
 
-
 static void *
-ndp120_app_device_health_check(void *d)
+ndp120_app_device_health_check(void)
 {
 	int s;
-	struct ndp120_dev_s *dev = (struct ndp120_dev_s *)d;
+	struct ndp120_dev_s *dev = (struct ndp120_dev_s *)_ndp_debug_handle;
 
 	uint32_t wait_period_ms;
 
@@ -981,7 +1015,7 @@ ndp120_app_device_health_check(void *d)
 			printf("Error: %d in check_firmware_aliveness\n", s);
 			goto out;
 		}
-		pm_sleep(5000);
+		pm_sleep(NDP_ALIVENESS_CHECK_PERIOD);
 	}
 
 out:
@@ -990,7 +1024,7 @@ out:
 }
 #endif
 
-int ndp120_init(struct ndp120_dev_s *dev)
+int ndp120_init(struct ndp120_dev_s *dev, bool reinit)
 {
 	/* File names */
 	int s;
@@ -1009,29 +1043,33 @@ int ndp120_init(struct ndp120_dev_s *dev)
 	/* save handle so we can use it from debug routine later, e.g. from other util/shell */
 	_ndp_debug_handle = dev;
 
-	s = pthread_mutex_init(&dev->ndp_mutex_mbsync, NULL);
-	if (s) {
-		auddbg("failed to initialize mb sync mutex variable\n");
-	}
+	if (!reinit) {
 
-	s = pthread_mutex_init(&dev->ndp_mutex_mcu_mb_in, NULL);
-	if (s) {
-		auddbg("failed to initialize mb in mutex variable\n");
-	}
+		s = pthread_mutex_init(&dev->ndp_mutex_mbsync, NULL);
+		if (s) {
+			auddbg("failed to initialize mb sync mutex variable\n");
+		}
 
-	s = pthread_mutex_init(&dev->ndp_mutex_notification_sample, NULL);
-	if (s) {
-		auddbg("failed to initialize mutex notification match\n");
-	}
+		s = pthread_mutex_init(&dev->ndp_mutex_mcu_mb_in, NULL);
+		if (s) {
+			auddbg("failed to initialize mb in mutex variable\n");
+		}
 
-	s = pthread_cond_init(&dev->ndp_cond_mcu_mb_in, NULL);
-	if (s) {
-		auddbg("failed to initialize ndp_cond_notification_sample\n");
-	}
+		s = pthread_mutex_init(&dev->ndp_mutex_notification_sample, NULL);
+		if (s) {
+			auddbg("failed to initialize mutex notification match\n");
+		}
 
-	s = pthread_cond_init(&dev->ndp_cond_notification_sample, NULL);
-	if (s) {
-		auddbg("failed to initialize ndp_cond_notification_sample\n");
+		s = pthread_cond_init(&dev->ndp_cond_mcu_mb_in, NULL);
+		if (s) {
+			auddbg("failed to initialize ndp_cond_notification_sample\n");
+		}
+
+		s = pthread_cond_init(&dev->ndp_cond_notification_sample, NULL);
+		if (s) {
+			auddbg("failed to initialize ndp_cond_notification_sample\n");
+		}
+
 	}
 
 	/* initialize NDP */
@@ -1080,7 +1118,9 @@ int ndp120_init(struct ndp120_dev_s *dev)
 
 	dev->keyword_bytes = round_down(KEYWORD_BUFFER_LEN, dev->sample_size);
 
-	dev->keyword_buffer = (uint8_t *)kmm_malloc(dev->keyword_bytes);
+	if (dev->keyword_buffer == NULL) {
+		dev->keyword_buffer = (uint8_t *)kmm_malloc(dev->keyword_bytes);
+	}
 
 	if (dev->keyword_buffer == NULL) {
 		auddbg("keyword buffer allocation failed\n");
@@ -1103,24 +1143,33 @@ int ndp120_init(struct ndp120_dev_s *dev)
 #endif
 
 #ifdef CONFIG_NDP120_ALIVE_CHECK
-	if (1) {
-		pthread_t thread;
-		int result = pthread_create(&thread, NULL, ndp120_app_device_health_check, dev);
-		if (result) {
+	if (!reinit) {
+		pid_t pid = kernel_thread("NDP_health_check", 100, 4096, ndp120_app_device_health_check, NULL);
+		if (pid < 0) {
 			auddbg("Device health check thread creation failed\n");
 		}
 	}
 #endif
+	dev->alive = true;
+
 errout_ndp120_init:
 	return s;
 }
 
-static inline void ndp120_poll_for_sample_ready(struct ndp120_dev_s *dev)
+static inline int ndp120_poll_for_sample_ready(struct ndp120_dev_s *dev)
 {
 	uint32_t notifications;
+	syntiant_ms_time start_time;
+	syntiant_get_ms_time(&start_time);
 	do {
 		syntiant_ndp120_poll(dev->ndp, &notifications, 1);
+		if (syntiant_get_ms_elapsed(&start_time) > 500) {
+			audvdbg("Sample ready interrupt didn't arrive in time\n");
+			return SYNTIANT_NDP_ERROR_TIMEOUT;
+		}
 	} while (!(notifications & SYNTIANT_NDP_NOTIFICATION_EXTRACT_READY));
+
+	return SYNTIANT_NDP_ERROR_NONE;
 }
 
 static void extract_keyword(struct ndp120_dev_s *dev)
@@ -1140,16 +1189,25 @@ static void extract_keyword(struct ndp120_dev_s *dev)
 				SYNTIANT_NDP_EXTRACT_FROM_MATCH, NULL,
 				&extract_bytes);
 
+	int retry = 0;
+
 	while (extracted < total_len) {
 		do {
 			extract_bytes = dev->extract_size;
 			if (extracted + extract_bytes > total_len) {
 				extract_bytes = dev->keyword_bytes - extracted;
 			}
-			ndp120_poll_for_sample_ready(dev);
-			s = syntiant_ndp_extract_data(dev->ndp, SYNTIANT_NDP_EXTRACT_TYPE_INPUT,
-				SYNTIANT_NDP_EXTRACT_FROM_UNREAD, &dev->keyword_buffer[extracted],
-				&extract_bytes);
+			if (ndp120_poll_for_sample_ready(dev) == SYNTIANT_NDP_ERROR_NONE) {
+				s = syntiant_ndp_extract_data(dev->ndp, SYNTIANT_NDP_EXTRACT_TYPE_INPUT,
+					SYNTIANT_NDP_EXTRACT_FROM_UNREAD, &dev->keyword_buffer[extracted],
+					&extract_bytes);
+				retry = 0;
+			} else {
+				retry++;
+				if (retry > 5) {
+					return;
+				}
+			}
 		} while (s == SYNTIANT_NDP_ERROR_DATA_REREAD);
 		extracted += extract_bytes;
 	}
@@ -1257,11 +1315,6 @@ int ndp120_irq_handler_work(struct ndp120_dev_s *dev)
 				case 0:
 					serialno++;
 					auddbg("[#%d Hi-Bixby] matched: %s\n", serialno, dev->labels_per_network[network_id][winner]);
-					/* extract keyword immediately */
-					extract_keyword(dev);
-#ifdef CONFIG_NDP120_AEC_SUPPORT
-					g_ndp120_state = IS_RECORDING;
-#endif
 					break;
 				case 1:
 					auddbg("[#%d Voice Commands] matched: %s\n", serialno, dev->labels_per_network[network_id][winner]);
@@ -1274,6 +1327,11 @@ int ndp120_irq_handler_work(struct ndp120_dev_s *dev)
 			msg.u.pPtr = NULL;
 			msg.msgId = AUDIO_MSG_NONE;
 			if (network_id == 0 && !dev->recording) {
+				/* extract keyword immediately */
+				extract_keyword(dev);
+#ifdef CONFIG_NDP120_AEC_SUPPORT
+				g_ndp120_state = IS_RECORDING;
+#endif
 				msg.msgId = AUDIO_MSG_KD;
 			} else if (network_id == 1) {
 				switch (winner) {
@@ -1317,12 +1375,18 @@ int ndp120_set_sample_ready_int(struct ndp120_dev_s *dev, int on)
 {
 	int s;
 	s = syntiant_ndp120_config_notify_on_sample_ready(dev->ndp, on);
+	auddbg("sample ready state (%d), ret (%d)\n", on, s);
 	return s;
 }
 
 int ndp120_extract_audio(struct ndp120_dev_s *dev, struct ap_buffer_s *apb)
 {
 	int s;
+
+	if (!dev->alive) {
+		apb->nbytes = 0;
+		return SYNTIANT_NDP_ERROR_UNINIT;
+	}
 
 	if (apb->nmaxbytes < dev->sample_size) {
 		/* currently we always try to flush of sample size at each call to this function
@@ -1345,34 +1409,57 @@ int ndp120_extract_audio(struct ndp120_dev_s *dev, struct ap_buffer_s *apb)
 		return SYNTIANT_NDP_ERROR_NONE;
 	}
 
-	/* wait for sample interrupt */
+	/* wait for sample interrupt for a given time */
 
 	int err = pthread_mutex_lock(&dev->ndp_mutex_notification_sample);
 	if (err) {
 		auddbg("NDP sample mutex lock err: %d\n", err);
 		return SYNTIANT_NDP_ERROR_FAIL;
 	}
-	err = pthread_cond_wait(&dev->ndp_cond_notification_sample,
-							&dev->ndp_mutex_notification_sample);
-	if (err) {
-		auddbg("NDP sample wait err: %d\n", err);
-		return SYNTIANT_NDP_ERROR_FAIL;
+
+	struct timespec abstime;
+	clock_gettime(CLOCK_REALTIME, &abstime);
+	/* Set timeout value to three sample sizes (2 should be enough). Generally the time values are in milli seconds */
+	/* 16KHz, 1 channel, 2bytes = 16000 * 1 * 2 = 32000 bytes per second, 32 bytes per millisecond, (sample size is 640 or 768) */
+	uint32_t timeout_in_msec = (3 * dev->sample_size * 1000) / (SYNTIANT_NDP120_AUDIO_SAMPLE_RATE * SYNTIANT_NDP120_AUDIO_SAMPLES_PER_WORD);
+	abstime.tv_nsec += timeout_in_msec * 1000000;
+
+	int timedwait_err = pthread_cond_timedwait(&dev->ndp_cond_notification_sample,
+							&dev->ndp_mutex_notification_sample, &abstime);
+	if (timedwait_err) {
+		auddbg("NDP sample wait err: %d\n", timedwait_err);
+		/* Fall through to unlock the mutex */
 	}
+
 	err = pthread_mutex_unlock(&dev->ndp_mutex_notification_sample);
 	if (err) {
 		auddbg("NDP sample mutex unlock err: %d\n", err);
 		return SYNTIANT_NDP_ERROR_FAIL;
 	}
 
-	do {
-		s = syntiant_ndp_extract_data(dev->ndp,
-			SYNTIANT_NDP_EXTRACT_TYPE_INPUT,
-			SYNTIANT_NDP_EXTRACT_FROM_UNREAD, apb->samp, &sample_size);
-	} while (s == SYNTIANT_NDP_ERROR_DATA_REREAD);
+	if (timedwait_err) {
+		/* Underrun need to be handled here, however, as of now we are doing
+		 * data extraction in sync. So, send back the apb with zero bytes
+		 * TODO : apply async method of extraction, then handle the underrun
+		 * case appropriately as we can add this buffer to pendq and use it
+		 */
+		apb->nbytes = 0;
+		return SYNTIANT_NDP_ERROR_FAIL;
+	}
 
-	apb->nbytes = dev->sample_size;
+	/* since apb can hold 4 samples, set extraction size to 4 */
+	uint32_t extract_size = apb->nmaxbytes;
+	s = syntiant_ndp_extract_data(dev->ndp,
+		SYNTIANT_NDP_EXTRACT_TYPE_INPUT,
+		SYNTIANT_NDP_EXTRACT_FROM_UNREAD, apb->samp, &extract_size);
 
-	return SYNTIANT_NDP_ERROR_NONE;
+	if (s) {
+		auddbg("error occured : %d\n", s);
+	}
+
+	apb->nbytes = extract_size;
+
+	return s;
 }
 
 int ndp120_kd_start(struct ndp120_dev_s *dev)

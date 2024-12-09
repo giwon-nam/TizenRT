@@ -505,8 +505,14 @@ static int ndp120_enqueuebuffer(FAR struct audio_lowerhalf_s *dev, FAR struct ap
 			break;
 		}
 	}
+
 	priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_DEQUEUE, apb, ret);
-	
+
+	if (ret == SYNTIANT_NDP_ERROR_UNINIT) {
+		// notify upper layer to stop capture
+		priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_UNREACHABLE, NULL, OK);
+	}
+
 	return 0;
 }
 
@@ -567,7 +573,7 @@ static int ndp120_ioctl(FAR struct audio_lowerhalf_s *dev, int cmd, unsigned lon
 
 		bufinfo = (FAR struct ap_buffer_info_s *)arg;
 
-		bufinfo->buffer_size = priv->sample_size;
+		bufinfo->buffer_size = 4 * priv->sample_size;
 		bufinfo->nbuffers = CONFIG_NDP120_NUM_BUFFERS;
 		
 		audvdbg("buffer_size : %d nbuffers : %d\n",
@@ -662,6 +668,36 @@ static int ndp120_ioctl(FAR struct audio_lowerhalf_s *dev, int cmd, unsigned lon
 		} else {
 			ret = -ENOSYS;
 		}
+		break;
+	}
+	case AUDIOIOC_MICMUTE: {
+		ndp120_takesem(&priv->devsem);
+		ret = ndp120_kd_stop(priv);
+		if (ret != 0) {
+			auddbg("ndp120_kd_stop failed ret : %d\n", ret);
+			return ret;
+		}
+#ifdef CONFIG_AUDIO_MULTI_SESSION
+		priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_MICMUTE, NULL, OK, NULL);
+#else
+		priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_MICMUTE, NULL, OK);
+#endif
+		ndp120_givesem(&priv->devsem);
+		break;
+	}
+	case AUDIOIOC_MICUNMUTE: {
+		ndp120_takesem(&priv->devsem);
+		ret = ndp120_kd_start(priv);
+		if (ret != 0) {
+			auddbg("ndp120_kd_start failed ret : %d\n", ret);
+			return ret;
+		}
+#ifdef CONFIG_AUDIO_MULTI_SESSION
+		priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_MICUNMUTE, NULL, OK, NULL);
+#else
+		priv->dev.upper(priv->dev.priv, AUDIO_CALLBACK_MICUNMUTE, NULL, OK);
+#endif
+		ndp120_givesem(&priv->devsem);
 		break;
 	}
 	default:
@@ -832,7 +868,7 @@ FAR struct audio_lowerhalf_s *ndp120_lowerhalf_initialize(FAR struct spi_dev_s *
 	priv->lower = lower;
 	priv->recording = false;
 
-	ret = ndp120_init(priv);
+	ret = ndp120_init(priv, false);
 	if (ret != OK) {
 		auddbg("ndp120 init failed\n");
 		free(priv);

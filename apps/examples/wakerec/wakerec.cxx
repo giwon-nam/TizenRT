@@ -49,7 +49,7 @@ using namespace media::voice;
 
 media::voice::SpeechDetector *sd;
 
-static const char *filePath = "/mnt/record.pcm";
+static const char *filePath = "/tmp/record.pcm";
 uint8_t *gBuffer = NULL;
 uint32_t bufferSize = 0;
 
@@ -102,6 +102,21 @@ private:
 	void onRecordStopError(media::MediaRecorder &mediaRecorder, media::recorder_error_t errCode) override
 	{
 		printf("#### onRecordStopError!! errCode : %d\n", errCode);
+	}
+
+	void onRecordStopped(media::MediaRecorder &mediaRecorder, media::recorder_error_t errCode) override
+	{
+		printf("##################################\n");
+		printf("####      onRecordStopped     ####\n");
+		printf("##################################\n");
+		
+		if (errCode == RECORDER_ERROR_DEVICE_DEAD) {
+			printf("####      Mic is unreachable     ####\n");
+			mr.unprepare();
+			mr.destroy();
+			fclose(fp);
+			playRecordVoice();
+		}
 	}
 
 	void onRecordBufferDataReached(media::MediaRecorder &mediaRecorder, std::shared_ptr<unsigned char> data, size_t size) override

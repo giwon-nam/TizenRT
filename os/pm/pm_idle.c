@@ -75,13 +75,17 @@ void pm_idle(void)
 	enum pm_state_e newstate;
 	clock_t now;
 #ifdef CONFIG_PM_TIMEDWAKEUP
-	clock_t delay;
+	clock_t delay = 0;
 #endif
 #ifdef CONFIG_SMP
 	int cpu;
 	int gated_cpu_count = 0;
 	FAR struct tcb_s *tcb;
 #endif
+	/* State change only if PM is ready to state change */
+	if (!g_pmglobals.is_running) {
+		return;
+	}
 	flags = enter_critical_section();
 	now = clock_systimer();
 	/* We need to check and change PM state transition only if one tick time has been passed,
@@ -106,7 +110,10 @@ void pm_idle(void)
 				/* If the CPU is just back from sleep, abort the sleep */
 				if (up_get_cpu_state(cpu) == CPU_WAKE_FROM_SLEEP) {
 					goto EXIT;
+				} else if (up_get_cpu_state(cpu) == CPU_HOTPLUG) {
+					continue;
 				}
+
 				/* Gate the cpu first, before checking which task it is handling */
 				if (!up_get_gating_flag_status(cpu)) {
 					up_set_gating_flag_status(cpu, 1);
@@ -133,6 +140,16 @@ void pm_idle(void)
 			}
 		}
 #endif
+#ifdef CONFIG_PM_TIMEDWAKEUP
+		/* get wakeup timer */
+		if (newstate == PM_SLEEP) {
+			delay = wd_getwakeupdelay();
+			if ((delay > 0) && (delay < MSEC2TICK(CONFIG_PM_SLEEP_ENTRY_WAIT_MS))) {
+				pmvdbg("Wdog Timer Delay: %ldms is less than SLEEP_ENTRY_WAIT: %ldms\n", TICK2MSEC(delay), CONFIG_PM_SLEEP_ENTRY_WAIT_MS);
+				goto EXIT;
+			}
+		}
+#endif
 		/* Then force the global state change */
 		if (pm_changestate(newstate) < 0) {
 			/* The new state change failed */
@@ -146,7 +163,9 @@ void pm_idle(void)
 #ifdef CONFIG_SMP
 		/* Send signal to shutdown other cores here */
 		for (cpu = 1; cpu < CONFIG_SMP_NCPUS; cpu++) {
-			up_cpu_hotplug(cpu);
+			if (up_get_cpu_state(cpu) == CPU_RUNNING) {
+				up_cpu_hotplug(cpu);
+			}
 			/* Reset core gating status flag */
 			up_set_gating_flag_status(cpu, 0);
 			/* Check whether each of the cpu has entered hotplug */
@@ -155,15 +174,9 @@ void pm_idle(void)
 #endif
 #ifdef CONFIG_PM_TIMEDWAKEUP
 		/* set wakeup timer */
-		delay = wd_getwakeupdelay();
 		if (delay > 0) {
-			if (delay < MSEC2TICK(CONFIG_PM_SLEEP_ENTRY_WAIT_MS)) {
-				pmvdbg("Wdog Timer Delay: %dms is less than SLEEP_ENTRY_WAIT: %dms\n", TICK2MSEC(delay), CONFIG_PM_SLEEP_ENTRY_WAIT_MS);
-				goto EXIT;
-			} else {
-				pmvdbg("Setting timer and board will wake up after %d millisecond\n", delay);
-				up_set_pm_timer(TICK2USEC(delay));
-			}
+			pmvdbg("Setting timer and board will wake up after %ld millisecond\n", delay);
+			up_set_pm_timer(TICK2USEC(delay));
 		}
 #endif
 		up_pm_board_sleep(pm_wakehandler);

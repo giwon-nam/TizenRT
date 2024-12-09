@@ -40,6 +40,7 @@ extern "C" {
  * @brief Result types of Audio Manager APIs such as FAIL, SUCCESS, or INVALID ARGS
  */
 enum audio_manager_result_e {
+	AUDIO_MANAGER_DEVICE_DEAD = -14,
 	AUDIO_MANAGER_DEVICE_SUSPENDED = -13,
 	AUDIO_MANAGER_DEVICE_ALREADY_IN_USE = -12,
 	AUDIO_MANAGER_SET_STREAM_POLICY_NOT_ALLOWED = -11,
@@ -778,6 +779,28 @@ audio_manager_result_t get_keyword_buffer_size(uint32_t *keywordBufferSize);
  *   On success, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
  ****************************************************************************/
 audio_manager_result_t get_keyword_data(uint8_t *buffer);
+
+/****************************************************************************
+ * Name: set_mic_mute
+ *
+ * Description:
+ *   Sets the microphone to mute state. Recorder client(if any) will get notified through onRecordStoppped callback.
+ *
+ * Return Value:
+ *   On successfully performing mic mute operation, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
+ ****************************************************************************/
+audio_manager_result_t set_mic_mute(void);
+
+/****************************************************************************
+ * Name: set_mic_unmute
+ *
+ * Description:
+ *   Unmutes the microphone.
+ *
+ * Return Value:
+ *   On successfully performing mic unmute operation, AUDIO_MANAGER_SUCCESS. Otherwise, a negative value.
+ ****************************************************************************/
+audio_manager_result_t set_mic_unmute(void);
 
 #ifdef CONFIG_DEBUG_MEDIA_INFO
 /****************************************************************************
