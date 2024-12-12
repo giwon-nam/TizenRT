@@ -176,3 +176,16 @@ ble_result_e ble_server_stop_adv(void);
 
 // Disconnect client. The client with secured connection would be required pairing again. 
 ble_result_e ble_server_disconnect(ble_conn_handle con_handle);
+
+ble_result_e ble_server_create_multi_adv(uint8_t adv_event_prop, uint32_t primary_adv_interval[2],
+												uint8_t own_addr_type, uint8_t own_addr_val[BLE_BD_ADDR_MAX_LEN], uint8_t *adv_handle);
+
+ble_result_e ble_server_delete_multi_adv(uint8_t adv_handle);
+
+ble_result_e ble_server_set_multi_adv_data(uint8_t adv_handle, uint16_t adv_data_len, uint8_t *adv_data);
+
+ble_result_e ble_server_set_multi_resp_data(uint8_t adv_handle, uint16_t adv_data_len, uint8_t *adv_data);
+
+ble_result_e ble_server_start_multi_adv(uint8_t adv_handle);
+
+ble_result_e ble_server_stop_multi_adv(uint8_t adv_handle);

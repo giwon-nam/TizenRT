@@ -767,6 +767,88 @@ static void *ble_scan_test_task(void)
 	return (void *)0;
 }
 
+static ble_client_ctx *g_disconn_ble_client_ctx = 0;
+static ble_conn_info g_disconn_ble_conn_info = {0};
+static pthread_t g_ble_disconn_test_thread;
+static bool g_ble_disconn_test_start = false;
+static bool g_ble_disconnect_request = false;
+static bool g_ble_disconn_test_connected = false;
+static int g_ble_disconn_test_connect_count = 0;
+static int g_ble_disconn_test_unexpected_count = 0;
+
+static void _ble_disconn_test_client_connected(ble_device_connected *connected_device)
+{
+	BLE_LOG_INFO("Disconn test connected callback called. server 0x%04x. count : %d/%d\n", connected_device->conn_handle, g_ble_disconn_test_unexpected_count, g_ble_disconn_test_connect_count);
+	g_ble_disconn_test_connected = true;
+	g_ble_disconnect_request = false;
+}
+
+static void _ble_disconn_test_client_disconnected(void)
+{
+	BLE_LOG_INFO("Disconn test disconnected callback called.\n");
+	if (g_ble_disconnect_request == false) {
+		g_ble_disconn_test_unexpected_count++;
+		BLE_LOG_ERROR("Unexpected disconnection. count : %d/%d\n", g_ble_disconn_test_unexpected_count, g_ble_disconn_test_connect_count);
+	}
+	g_ble_disconn_test_connected = false;
+}
+
+static void _ble_disconn_test_client_notification(ble_attr_handle attr_handle, ble_data *read_result)
+{
+	BLE_LOG_INFO("Disconn test notification callback called.\n");
+}
+
+static void _ble_disconn_test_client_indication(ble_attr_handle attr_handle, ble_data *read_result)
+{
+	BLE_LOG_INFO("Disconn test indication callback called.\n");
+}
+
+static ble_client_callback_list g_disconn_ble_cb_list = {
+	.connected_cb = _ble_disconn_test_client_connected,
+	.disconnected_cb = _ble_disconn_test_client_disconnected,
+	.notification_cb = _ble_disconn_test_client_notification,
+	.indication_cb = _ble_disconn_test_client_indication,
+};
+
+static void *_ble_disconn_test_task(void)
+{
+	g_ble_disconn_test_start = true;
+	if ((g_disconn_ble_client_ctx = ble_client_create_ctx(&g_disconn_ble_cb_list)) == 0) {
+		BLE_LOG_ERROR("Failed to create client ctx\n");
+		return (void *)0;
+	}
+
+	if (ble_client_autoconnect(g_disconn_ble_client_ctx, false) != BLE_MANAGER_SUCCESS) {
+		BLE_LOG_ERROR("Failed to set autoconnect\n");
+		return (void *)0;
+	}
+
+	g_ble_disconn_test_connect_count = 0;
+	g_ble_disconn_test_unexpected_count = 0;
+
+	while (g_ble_disconn_test_start == true) {
+		sleep(5);
+		if (g_ble_disconn_test_connected == false) {
+			if (ble_client_connect(g_disconn_ble_client_ctx, &g_disconn_ble_conn_info) != BLE_MANAGER_SUCCESS) {
+				BLE_LOG_ERROR("Failed to connect\n");
+				continue;
+			}
+			g_ble_disconn_test_connect_count++;
+			continue;
+		}
+
+		if (g_ble_disconn_test_connected == true) {
+			if (ble_client_disconnect(g_disconn_ble_client_ctx) != BLE_MANAGER_SUCCESS) {
+				BLE_LOG_ERROR("Failed to disconnect\n");
+				continue;
+			}
+			g_ble_disconnect_request = true;
+		}
+	}
+
+	return (void *)0;
+}
+
 static void ble_command_test(int argc, char *argv[])
 {
 	if (argc < 4) {
@@ -790,29 +872,44 @@ static void ble_command_test(int argc, char *argv[])
 			scanning = false;
 			pthread_cancel(ble_scan_test_thread);
 		}
+	} else if (strcmp(argv[2], "disconn") == 0) {
+		ble_addr addr = {0};
+		str_to_ble_mac(argv[3], addr.mac);
+		addr.type = BLE_ADDR_TYPE_PUBLIC;
+		memcpy(&g_disconn_ble_conn_info.addr, &addr, sizeof(ble_addr));
+		g_disconn_ble_conn_info.conn_interval = 8;
+		g_disconn_ble_conn_info.slave_latency = 0;
+		g_disconn_ble_conn_info.mtu = 500;
+		g_disconn_ble_conn_info.scan_timeout = 5 * 1000;
+		g_disconn_ble_conn_info.is_secured_connect = false;
+
+		pthread_create(&g_ble_disconn_test_thread, NULL, (pthread_startroutine_t)_ble_disconn_test_task, NULL);
 	} else {
 		ble_command_print_help_message();
 	}
 }
 
+uint8_t adv_handle = 255;
+
 static void ble_server_connected_cb(ble_conn_handle con_handle, ble_server_connection_type_e conn_type, uint8_t mac[BLE_BD_ADDR_MAX_LEN])
 {
-	return;
+	BLE_LOG_INFO("ble server connected callback called.\n");
 }
 
 static void ble_server_disconnected_cb(ble_conn_handle con_handle, uint16_t cause)
 {
-	return;
+	BLE_LOG_INFO("ble server disconnected callback called.\n");
+	ble_server_start_multi_adv(adv_handle);
 }
 
 static void ble_server_mtu_update_cb(ble_conn_handle con_handle, uint16_t mtu_size)
 {
-	return;
+	BLE_LOG_INFO("ble server mtu_update callback called.\n");
 }
 
 static void ble_server_oneshot_adv_cb(uint16_t adv_result)
 {
-	printf("result : %d\n", adv_result);
+	BLE_LOG_INFO("ble server oneshot_adv callback called.\n");
 	return;
 }
 
@@ -840,24 +937,22 @@ static ble_server_gatt_t gatt_profile[] = {
 		.attr_handle = 0x006a,
 	},
 
-	{
-		.type = BLE_SERVER_GATT_CHARACT, 
-		.uuid = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02}, 
-		.uuid_length = 16, 
-		.property = BLE_ATTR_PROP_RWN | BLE_ATTR_PROP_WRITE_NO_RSP, 
-		.permission = BLE_ATTR_PERM_R_PERMIT | BLE_ATTR_PERM_W_PERMIT, 
-		.attr_handle = 0x006b, 
-		.cb = utc_cb_charact_a_1, 
-		.arg = "char_a_1"
-	},
+	{.type = BLE_SERVER_GATT_CHARACT,
+	 .uuid = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02},
+	 .uuid_length = 16,
+	 .property = BLE_ATTR_PROP_RWN | BLE_ATTR_PROP_WRITE_NO_RSP,
+	 .permission = BLE_ATTR_PERM_R_PERMIT | BLE_ATTR_PERM_W_PERMIT,
+	 .attr_handle = 0x006b,
+	 .cb = utc_cb_charact_a_1,
+	 .arg = "char_a_1"},
 
 	{
-		.type = BLE_SERVER_GATT_DESC, 
-		.uuid = {0x02, 0x29}, 
-		.uuid_length = 2, 
-		.permission = BLE_ATTR_PERM_R_PERMIT | BLE_ATTR_PERM_W_PERMIT, 
-		.attr_handle = 0x006c, 
-		.cb = utc_cb_desc_b_1, 
+		.type = BLE_SERVER_GATT_DESC,
+		.uuid = {0x02, 0x29},
+		.uuid_length = 2,
+		.permission = BLE_ATTR_PERM_R_PERMIT | BLE_ATTR_PERM_W_PERMIT,
+		.attr_handle = 0x006c,
+		.cb = utc_cb_desc_b_1,
 		.arg = "desc_b_1",
 	},
 };
@@ -890,8 +985,11 @@ static int ble_command(int argc, char *argv[])
 	} else if (strcmp(argv[1], "test") == 0) {
 		ble_command_test(argc, argv);
 	} else if (strcmp(argv[1], "init") == 0) {
-		str_to_ble_mac(argv[2], (uint8_t *)&target_addr[0].mac);
 		ble_manager_init(&server_config);
+		uint32_t adv_interval[2] = {100, 100};
+		uint8_t addr_val[BLE_BD_ADDR_MAX_LEN] = {0};
+		ble_server_create_multi_adv(0x13, adv_interval, 0, addr_val, &adv_handle);
+		ble_server_start_multi_adv(adv_handle);
 	} else {
 		ble_command_print_help_message();
 	}
