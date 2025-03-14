@@ -52,7 +52,7 @@ typedef struct _ble_bonded_device_list {
  *
  * Description:
  *   Initialize ble manager.
- * 
+ *
  * Input Parameters:
  *   server_config - Server config. It can be NULL if an user doesn't want server role.
  *
@@ -81,10 +81,10 @@ ble_result_e ble_manager_deinit(void);
  *
  * Description:
  *   Get mac address of BLE device.
- * 
+ *
  * Output Parameters:
  *   mac       - Empty buffer for mac address.
- * 
+ *
  * Returned Value
  *   Zero (BLE_RESULT_SUCCESS) is returned on success; a positive value is returned on
  *   failure.
@@ -107,7 +107,7 @@ ble_result_e ble_manager_get_mac_addr(uint8_t mac[BLE_BD_ADDR_MAX_LEN]);
  *   failure.
  *
  ****************************************************************************/
-ble_result_e ble_manager_get_bonded_device(ble_bonded_device_list* device_list, uint16_t* device_count);
+ble_result_e ble_manager_get_bonded_device(ble_bonded_device_list *device_list, uint16_t *device_count);
 
 /****************************************************************************
  * Name: ble_manager_delete_bonded
@@ -150,14 +150,13 @@ ble_result_e ble_manager_conn_is_any_active(bool *is_active);
  *
  * Input Parameters:
  *   version  - 3 bytes array to get BLE current version.
- * 
+ *
  * Returned Value
  *   Zero (BLE_RESULT_SUCCESS) is returned on success; a positive value is returned on
  *   failure.
  *
  ****************************************************************************/
 ble_result_e ble_manager_get_version(uint8_t version[3]);
-
 
 /****************************************************************************
  * Name: ble_manager_conn_param_update
@@ -168,7 +167,7 @@ ble_result_e ble_manager_get_version(uint8_t version[3]);
  * Input Parameters:
  *   con_handle : con handle for request
  *   ble_conn_param : structure including connection parameters.
- * 
+ *
  * Returned Value
  *   Zero (BLE_RESULT_SUCCESS) is returned on success; a positive value is returned on
  *   failure.
@@ -177,3 +176,22 @@ ble_result_e ble_manager_get_version(uint8_t version[3]);
 ble_result_e ble_manager_conn_param_update(ble_conn_handle *con_handle, ble_conn_param *conn_param);
 
 ble_result_e ble_manager_set_gap_device_name(char name[BLE_GAP_DEVICE_NAME_LEN]);
+
+ble_result_e ble_manager_passkey_confirm(uint8_t conn_handle, uint8_t confirm);
+
+ble_result_e ble_manager_set_secure_param(ble_sec_param *sec_param);
+
+ble_result_e ble_server_create_multi_adv(uint8_t adv_event_prop, uint32_t primary_adv_interval[2],
+										 uint8_t own_addr_type, uint8_t own_addr_val[BLE_BD_ADDR_MAX_LEN], uint8_t *adv_handle);
+
+ble_result_e ble_server_delete_multi_adv(uint8_t adv_handle);
+
+ble_result_e ble_server_set_multi_adv_data(uint8_t adv_handle, uint16_t adv_data_len, uint8_t *adv_data);
+
+ble_result_e ble_server_set_multi_resp_data(uint8_t adv_handle, uint16_t adv_data_len, uint8_t *adv_data);
+
+ble_result_e ble_server_start_multi_adv(uint8_t adv_handle);
+
+ble_result_e ble_server_stop_multi_adv(uint8_t adv_handle);
+
+ble_result_e ble_manager_start_bond(ble_conn_handle conn_handle);
