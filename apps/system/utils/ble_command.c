@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <pthread.h>
 
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <tinyara/pm/pm.h>
+
 #include <ble_manager/ble_manager.h>
 #include <apps/shell/tash.h>
 
@@ -18,6 +22,8 @@ static void ble_command_print_help_message(void)
 {
 	char *help_message =
 		"Usage :\n"
+		"\tcble init\n"
+		"\tcble pm\n"
 		"\tcble init\n"
 		"\tcble status\n"
 		"\tcble del\n"
@@ -200,6 +206,18 @@ static int ble_command(int argc, char *argv[])
 
 	if (strcmp(argv[1], "status") == 0) {
 		ble_command_status();
+	} else if (strcmp(argv[1], "pm") == 0) {
+		int fd = open(PM_DRVPATH, O_WRONLY);
+		if (fd < 0) {
+			return 0;
+		}
+
+		if (ioctl(fd, PMIOC_START, NULL) < 0) {
+			close(fd);
+			return 0;
+		}
+
+		close(fd);
 	} else if (strcmp(argv[1], "del") == 0) {
 		ble_manager_delete_bonded_all();
 	} else if (strcmp(argv[1], "init") == 0) {
