@@ -41,6 +41,17 @@
 #define CONFIG_LCD_MAXPOWER 100
 #endif
 
+enum lcd_mode_e {
+	LCD_ON = 0,
+	LCD_OFF = 1
+};
+
+typedef enum lcd_mode_e lcd_mode_t;
+
+#if !defined(CONFIG_LCD_SEND_CMD_RETRY_COUNT)
+#define CONFIG_LCD_SEND_CMD_RETRY_COUNT 0
+#endif
+
 extern const uint8_t lcd_logo_raw_data[]; // Buffer containing only logo
 static uint8_t *lcd_init_fullscreen_image = NULL; // Buffer containing full screen data with logo on specific position
 
@@ -111,11 +122,30 @@ struct mipi_lcd_dev_s {
 	//u8 *BackupLcdImgBuffer;
 	int fb_alloc_count;
 	uint8_t power;
+	lcd_mode_t lcdonoff;
 	sem_t sem;
 	struct mipi_lcd_config_s *config;
 };
 
 static struct mipi_lcd_dev_s g_lcdcdev;
+
+static int send_to_mipi_dsi(struct mipi_lcd_dev_s *priv, struct mipi_dsi_msg* msg)
+{
+	int transfer_status = ERROR;
+	int max_cmd_retry_count = CONFIG_LCD_SEND_CMD_RETRY_COUNT;
+	transfer_status = mipi_dsi_transfer(priv->dsi_dev, msg);
+
+	/* Retry Case */
+	while (max_cmd_retry_count && transfer_status != OK) {
+		transfer_status = mipi_dsi_transfer(priv->dsi_dev, msg);
+		max_cmd_retry_count--;
+	}
+
+	if (transfer_status != OK) {
+		lcddbg("Command %x not sent\n", cmd);
+	}
+	return transfer_status;
+}
 
 static int send_cmd(struct mipi_lcd_dev_s *priv, lcm_setting_table_t command)
 {
@@ -135,12 +165,7 @@ static int send_cmd(struct mipi_lcd_dev_s *priv, lcm_setting_table_t command)
 	msg.tx_buf = cmd_addr;
 	msg.tx_len = payload_len;
 	msg.flags = 0;
-	priv->config->lcd_mode_switch(false);
-	transfer_status = mipi_dsi_transfer(priv->dsi_dev, &msg);
-	priv->config->lcd_mode_switch(true);
-	if (transfer_status != OK) {
-		lcddbg("Command %x not sent \n", cmd);
-	}
+	transfer_status = send_to_mipi_dsi(priv, &msg);
 	return transfer_status;
 }
 
@@ -160,7 +185,7 @@ static int send_init_cmd(struct mipi_lcd_dev_s *priv, lcm_setting_table_t *table
 			break;
 		case REGFLAG_END_OF_TABLE:
 			msg.type = MIPI_DSI_END_OF_TRANSMISSION;
-			return mipi_dsi_transfer(priv->dsi_dev, &msg);
+			return send_to_mipi_dsi(priv, &msg);
 		default:
 			cmd_addr = table[send_cmd_idx_s].para_list;
 			payload_len = table[send_cmd_idx_s].count;
@@ -175,9 +200,8 @@ static int send_init_cmd(struct mipi_lcd_dev_s *priv, lcm_setting_table_t *table
 			msg.tx_buf = cmd_addr;
 			msg.tx_len = payload_len;
 			msg.flags = 0;
-			transfer_status = mipi_dsi_transfer(priv->dsi_dev, &msg);
+			transfer_status = send_to_mipi_dsi(priv, &msg);
 			if (transfer_status != OK) {
-				lcddbg("Command %x not sent \n", cmd);
 				return transfer_status;
 			}
 		}
@@ -255,6 +279,10 @@ static int lcd_putarea(FAR struct lcd_dev_s *dev, fb_coord_t row_start, fb_coord
 	}
 	priv->config->lcd_put_area((u8 *)buffer, row_start, col_start, row_end, col_end);
 #endif
+	if (priv->lcdonoff == LCD_OFF) {
+                priv->config->mipi_mode_switch(VIDEO_MODE);
+                priv->lcdonoff = LCD_ON;
+        }
 	sem_post(&priv->sem);
 	return OK;
 }
@@ -352,6 +380,8 @@ static int lcd_setpower(FAR struct lcd_dev_s *dev, int power)
 	}
 	if (power == 0) {
 		priv->config->backlight(power);
+		priv->config->mipi_mode_switch(CMD_MODE);
+		priv->lcdonoff = LCD_OFF;
 		lcm_setting_table_t display_off_cmd = {0x28, 0, {0x00}};
 		send_cmd(priv, display_off_cmd);
 		/* The power off must operate only when LCD is ON */
@@ -361,9 +391,9 @@ static int lcd_setpower(FAR struct lcd_dev_s *dev, int power)
 		if (priv->power == 0) {
 			priv->config->power_on();
 			/* We need to send init cmd after LCD IC power on */
-			priv->config->lcd_mode_switch(false);
-			send_init_cmd(priv, lcd_init_cmd_g);
-			priv->config->lcd_mode_switch(true);
+			if (send_init_cmd(priv, lcd_init_cmd_g) != OK) {
+				lcddbg("ERROR: LCD Init sequence failed\n");
+			}
 		}
 		priv->config->backlight(power);
 	}
@@ -465,8 +495,8 @@ FAR void lcd_init_put_image(FAR struct lcd_dev_s *dev)
 
 #if defined(CONFIG_LCD_LOGO)
 	while (logo_arr_index < (LOGO_YRES * LOGO_XRES * 2)) {
-		lcd_init_fullscreen_image[lcd_data_index] = lcd_logo_raw_data[logo_arr_index++];
 		lcd_init_fullscreen_image[lcd_data_index + 1] = lcd_logo_raw_data[logo_arr_index++];
+		lcd_init_fullscreen_image[lcd_data_index] = lcd_logo_raw_data[logo_arr_index++];
 		lcd_data_index += 2;
 		lcd_data_col_count += 1;
 		if (lcd_data_col_count == LOGO_XRES) {
@@ -477,6 +507,9 @@ FAR void lcd_init_put_image(FAR struct lcd_dev_s *dev)
 #endif
 
 	priv->config->lcd_put_area((u8 *)lcd_init_fullscreen_image, 1, 1, CONFIG_LCD_XRES, CONFIG_LCD_YRES);	// 1, 1 -> Start index of the frame buffer
+	priv->config->mipi_mode_switch(VIDEO_MODE);
+	priv->lcdonoff = LCD_ON;
+
 }
 
 FAR struct lcd_dev_s *mipi_lcdinitialize(FAR struct mipi_dsi_device *dsi, struct mipi_lcd_config_s *config)
@@ -491,13 +524,8 @@ FAR struct lcd_dev_s *mipi_lcdinitialize(FAR struct mipi_dsi_device *dsi, struct
 	priv->dev.init = lcd_init;
 	priv->dsi_dev = dsi;
 	priv->config = config;
-	if (send_init_cmd(priv, lcd_init_cmd_g) == OK) {
-		lcdvdbg("LCD Init sequence completed\n");
-	} else {
-		lcddbg("ERROR: LCD Init sequence failed\n");
-	}
-	priv->config->backlight(CONFIG_LCD_MAXPOWER);
-	priv->power = CONFIG_LCD_MAXPOWER;
+	priv->power = 0;
+	priv->lcdonoff = LCD_OFF;
 
 	sem_init(&priv->sem, 0 , 1);
 #if defined(CONFIG_LCD_SW_ROTATION)

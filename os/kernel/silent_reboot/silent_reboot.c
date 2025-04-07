@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 #include <time.h>
+#include <errno.h>
 #include <tinyara/clock.h>
 #include <tinyara/wdog.h>
 
@@ -325,7 +326,6 @@ int silent_reboot_force_perform_after_timeout(int timeout)
 {
 	int ret;
 	int tick_remain;
-	WDOG_ID wdog;
 
 	tick_remain = wd_gettime(g_silent_wdog);
 	if (SEC2TICK(timeout) > tick_remain) {
@@ -351,11 +351,9 @@ int silent_reboot_force_perform_after_timeout(int timeout)
  *   Check whether silent mode or not.
  *
  ****************************************************************************/
-int silent_reboot_is_silent_mode(bool *is_silent_mode)
+bool silent_reboot_is_silent_mode(void)
 {
-	*is_silent_mode = g_is_silent_mode;
-
-	return OK;
+	return g_is_silent_mode;
 }
 
 /****************************************************************************

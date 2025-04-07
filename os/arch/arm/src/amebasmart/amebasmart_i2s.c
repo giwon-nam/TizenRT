@@ -119,7 +119,7 @@
 
 #define OVER_SAMPLE_RATE (384U)
 
-#define I2S_DMA_PAGE_SIZE 4096 	/* 4 ~ 16384, set to a factor of APB size */
+#define I2S_DMA_PAGE_SIZE 8192 	/* 4 ~ 16384, set to a factor of APB size */
 #define I2S_DMA_PAGE_NUM 4	/* Vaild number is 2~4 */
 
 #ifdef CONFIG_PM
@@ -407,7 +407,7 @@ static int amebasmart_i2s_tx(struct amebasmart_i2s_s *priv, struct amebasmart_bu
 			ptx_buf = i2s_get_tx_page(priv->i2s_object);
 			i2s_enable(priv->i2s_object);
 			if (ptx_buf) {
-				if ((apb->nbytes - apb->curbyte) <= tx_size) {
+				if ((apb->nbytes - apb->curbyte) < tx_size) {
 					tx_size = apb->nbytes - apb->curbyte;
 					memset(ptx_buf, 0, I2S_DMA_PAGE_SIZE); /* Clear ptx_buf to prevent sending old data since we are sending less than I2S_DMA_PAGE_SIZE */
 					memcpy((void *)ptx_buf, (void *)&apb->samp[apb->curbyte], tx_size);
@@ -417,7 +417,7 @@ static int amebasmart_i2s_tx(struct amebasmart_i2s_s *priv, struct amebasmart_bu
 				apb->curbyte += tx_size; /* No padding, ptx_buf is big enough to fill the whole tx_size */
 
 				
-				i2s_send_page(priv->i2s_object, (uint32_t *)ptx_buf);
+				i2s_send_page();
 			} else {
 				break;
 			}
@@ -559,7 +559,16 @@ static void i2s_tx_schedule(struct amebasmart_i2s_s *priv, int result)
 		/* Start next transfer */
 		amebasmart_i2s_tx(priv, bfcontainer);
 	} else if ((priv->apb_tx->nbytes - priv->apb_tx->curbyte) <= 0) {
-		ameba_i2s_pause(priv->i2s_object);
+		if (i2s_dma_tx_done(I2S_DMA_PAGE_NUM) == OK ){
+			/*if all dma tx done, we should pause i2s dma to mute it*/
+			ameba_i2s_pause(priv->i2s_object);
+		} else if (priv->apb_tx->nbytes < I2S_DMA_PAGE_SIZE * I2S_DMA_PAGE_NUM) {
+			/*we should wait for all dma page tx complete before call back to application 
+			to terminate i2s tx during the last container, here we assume last container data is smaller than total size
+			if it is not the last container, we can callback to application to send the next container while dma page not fully
+			tx complete to prevent delay in updating data in application that might lead to noise.*/
+			return;
+		}
 	}
 
 	/* If the worker has completed running, then reschedule the working thread.
@@ -661,7 +670,7 @@ static int i2s_send(struct i2s_dev_s *dev, struct ap_buffer_s *apb, i2s_callback
 		bsp_pm_domain_control(BSP_I2S_DRV, 1);
 	}
 #endif
-	i2sinfo("[I2S TX] apb=%p nbytes=%d samp=%p arg=%p timeout=%d\n", apb, apb->nbytes - apb->curbyte, apb->samp, arg, timeout);
+	// i2sinfo("[I2S TX] apb=%p nbytes=%d samp=%p arg=%p timeout=%d\n", apb, apb->nbytes - apb->curbyte, apb->samp, arg, timeout);
 	i2s_dump_buffer("Sending", &apb->samp[apb->curbyte], apb->nbytes - apb->curbyte);
 #if defined(I2S_HAVE_TX) && (0 < I2S_HAVE_TX)
 	
@@ -732,7 +741,7 @@ void i2s_transfer_tx_handleirq(void *data, char *pbuf)
 			int *ptx_buf;
 			ptx_buf = i2s_get_tx_page(priv->i2s_object);
 			if (ptx_buf) {
-				if ((priv->apb_tx->nbytes - priv->apb_tx->curbyte) <= tx_size) {
+				if ((priv->apb_tx->nbytes - priv->apb_tx->curbyte) < tx_size) {
 					tx_size = priv->apb_tx->nbytes - priv->apb_tx->curbyte;
 					memset(ptx_buf, 0, I2S_DMA_PAGE_SIZE); /* Clear ptx_buf to prevent sending old data since we are sending less than I2S_DMA_PAGE_SIZE */
 					memcpy((void *)ptx_buf, (void *)&priv->apb_tx->samp[priv->apb_tx->curbyte], tx_size);
@@ -740,7 +749,7 @@ void i2s_transfer_tx_handleirq(void *data, char *pbuf)
 					memcpy((void *)ptx_buf, (void *)&priv->apb_tx->samp[priv->apb_tx->curbyte], I2S_DMA_PAGE_SIZE);
 				}
 				priv->apb_tx->curbyte += tx_size; /* No padding, ptx_buf is big enough to fill the whole tx_size */
-				i2s_send_page(priv->i2s_object, (uint32_t *)ptx_buf);
+				i2s_send_page();
 			} else {
 				break;
 			}
@@ -1499,6 +1508,8 @@ static int i2s_stop(struct i2s_dev_s *dev, i2s_ch_dir_t dir)
 #if defined(I2S_HAVE_TX) && (0 < I2S_HAVE_TX)
 	if (dir == I2S_TX) {
 		i2s_disable(priv->i2s_object, 0);
+		i2s_set_dma_buffer(priv->i2s_object, (char *)priv->i2s_tx_buf, NULL, I2S_DMA_PAGE_NUM, I2S_DMA_PAGE_SIZE); /* Allocate DMA Buffer for TX */
+		amebasmart_i2s_isr_initialize(priv);
 		while (sq_peek(&priv->tx.pend) != NULL) {
 			flags = enter_critical_section();
 			bfcontainer = (struct amebasmart_buffer_s *)sq_remfirst(&priv->tx.pend);
@@ -1521,14 +1532,12 @@ static int i2s_stop(struct i2s_dev_s *dev, i2s_ch_dir_t dir)
 			leave_critical_section(flags);
 			i2s_buf_tx_free(priv, bfcontainer);
 		}
-		i2s_set_dma_buffer(priv->i2s_object, (char *)priv->i2s_tx_buf, NULL, I2S_DMA_PAGE_NUM, I2S_DMA_PAGE_SIZE); /* Allocate DMA Buffer for TX */
-		amebasmart_i2s_isr_initialize(priv);
 #ifdef CONFIG_PM
 	if (i2s_lock_state) {
 		i2s_lock_state = 0;
 		bsp_pm_domain_control(BSP_I2S_DRV, 0);
 	}
-#endif
+#endif		
 	}
 #endif
 
