@@ -1034,16 +1034,10 @@ int ble_rmc_main(int argc, char *argv[])
 		uint8_t type1 = 0;
 		uint8_t type2 = 3;
 		int counter = 0;
+		int interval = atoi(argv[2]) * 1000;
 		while(1){
-			counter++;
-			if (counter == 100)
-				break;
-
-			usleep(80000);
 			ret = ble_server_one_shot_adv(adv_id_0);
-
-			usleep(20000);
-			ret = ble_server_one_shot_adv(adv_id_1);
+			usleep(interval);
 		}
 	}
 
@@ -1135,7 +1129,7 @@ int ble_rmc_main(int argc, char *argv[])
 			RMC_LOG(RMC_SERVER_TAG, "Stop adv ... ok\n");
 		}
 
-		if (argc == 4 && strncmp(argv[2], "cremuladv", 10) == 0) {
+		if (argc == 5 && strncmp(argv[2], "cremuladv", 10) == 0) {
 			uint8_t adv_handle = 0;
 			if (argc > 2) {
 				adv_handle = atoi(argv[3]);
@@ -1144,8 +1138,9 @@ int ble_rmc_main(int argc, char *argv[])
 				goto ble_rmc_done;
 			}
 //			uint8_t adv_event_prop = 0x1;//extended adv   
+			uint32_t adv_interval = atoi(argv[4]) * 1.6;
 			uint8_t adv_event_prop = 0x13;//legacy adv   
-			uint32_t adv_interval_int[2] = {32,32};
+			uint32_t adv_interval_int[2] = {adv_interval, adv_interval};
 			uint8_t own_addr_type = 1;
  			int16_t val = 0x7f;
 			if (adv_handle == 0){
