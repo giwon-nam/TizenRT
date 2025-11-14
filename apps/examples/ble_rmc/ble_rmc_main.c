@@ -1141,7 +1141,7 @@ int ble_rmc_main(int argc, char *argv[])
 			uint32_t adv_interval = atoi(argv[4]) * 1.6;
 			uint8_t adv_event_prop = 0x13;//legacy adv   
 			uint32_t adv_interval_int[2] = {adv_interval, adv_interval};
-			uint8_t own_addr_type = 1;
+			uint8_t own_addr_type = 0;
  			int16_t val = 0x7f;
 			if (adv_handle == 0){
 				ret = ble_server_create_multi_adv(adv_event_prop,
