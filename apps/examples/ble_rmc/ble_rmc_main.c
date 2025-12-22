@@ -434,7 +434,7 @@ static int ble_connect_common(ble_client_ctx *ctx, ble_addr *addr, bool is_auto)
 	conn_info.slave_latency = 128;
 	conn_info.mtu = 240;
 	conn_info.scan_timeout = 1000;
-	conn_info.is_secured_connect = true;
+	conn_info.is_secured_connect = false;
 
 	if (ctx == NULL) {
 		RMC_LOG(RMC_CLIENT_TAG, "ctx fail\n");
@@ -564,6 +564,7 @@ bool hexdata_str_to_bd_addr2(char *str, uint8_t *addr_buf, uint8_t buf_len)
 	return TRUE;
 }
 
+static ble_client_ctx *g_client_ctx[3] = {0};
 uint8_t coc_data[10] = {0x67,1,2,3,4,5,6,7,0x88};
 uint8_t coc_data_2[1] = {0x67};
 int ble_rmc_main(int argc, char *argv[])
@@ -928,13 +929,15 @@ int ble_rmc_main(int argc, char *argv[])
 	}
 
 	if (strncmp(argv[1], "connect", 8) == 0) {
-		ble_client_ctx *ctx = NULL;
+		int index = atoi(argv[2]);
 		uint8_t addrr [6] ={0};  
-		hexdata_str_to_bd_addr2(argv[2], addrr, 6); 
+		hexdata_str_to_bd_addr2(argv[3], addrr, 6); 
 
 		// 3. create ctx
-		ctx = ble_client_create_ctx(&client_config);
-		if (ctx == NULL) {
+		if (g_client_ctx[index] == NULL) {
+			g_client_ctx[index] = ble_client_create_ctx(&client_config);
+		}
+		if (g_client_ctx[index] == NULL) {
 			RMC_LOG(RMC_CLIENT_TAG, "create ctx fail\n");
 			goto ble_rmc_done;
 		}
@@ -956,16 +959,16 @@ int ble_rmc_main(int argc, char *argv[])
 		);
 
 		int val;
-		if (argc == 3 && strncmp(argv[2], "auto", 5) == 0) {
+		if (argc == 3 && strncmp(argv[3], "auto", 5) == 0) {
 			/* For initial connection, remove bonded data all */
-			val = ble_connect_common(ctx, &g_target, true);
+			val = ble_connect_common(g_client_ctx[index], &g_target, true);
 		} else {
-			val = ble_connect_common(ctx, &g_target, false);
+			val = ble_connect_common(g_client_ctx[index], &g_target, false);
 		}
 		RMC_LOG(RMC_CLIENT_TAG, "Connect Result : %d\n", val);
 		if (val == 0) {
 			RMC_LOG(RMC_CLIENT_TAG, "Connect Success [ID : %d]\n", ctx_count);
-			ctx_list[ctx_count++] = ctx;
+			ctx_list[ctx_count++] = g_client_ctx[index];
 		}
 	}
 
