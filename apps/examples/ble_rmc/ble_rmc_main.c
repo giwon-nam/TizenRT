@@ -237,24 +237,13 @@ static void *multi_adv_thread(void *data)
 	ble_result_e ret = BLE_MANAGER_FAIL;
 	uint8_t adv_id_0 = 0;
 	uint8_t adv_id_1 = 1;
-	int max_count = *(int *)(data);
-	int adv_counter = 0;
+	int interval = *(int *)(data);
 
-	RMC_LOG(RMC_SERVER_TAG, "Multi Adv Start, ID: %d, %d, for %d times\n", adv_id_0, adv_id_1, max_count);
+	RMC_LOG(RMC_SERVER_TAG, "Oneshot Adv Start, ID: %d, interval: %d\n", adv_id_0, interval);
 	while (1) {
-		adv_counter++;
-		if (adv_counter == max_count || multi_adv_stop == 0xFFFF) {
-			multi_adv_stop = 0;
-			break;
-		}
-
-		usleep(80000);
+		usleep(interval);
 		ret = ble_server_one_shot_adv(adv_id_0);
-
-		usleep(20000);
-		ret = ble_server_one_shot_adv(adv_id_1);
 	}
-	RMC_LOG(RMC_SERVER_TAG, "Multi Adv Stop, ID: %d, %d\n", adv_id_0, adv_id_1);
 }
 
 
@@ -1026,12 +1015,12 @@ int ble_rmc_main(int argc, char *argv[])
 
 	if (strncmp(argv[1], "adv", 4) == 0) {
 		pthread_t pid;
-		int max_count = 100;
+		int interval = 20 * 1000;
 		if (argc == 3) {
-			max_count = atoi(argv[2]);
+			interval = atoi(argv[2]) * 1000;
 		}
 		/* Create multi Adv pthread */
-		if ((ret = pthread_create(&pid, NULL, (pthread_startroutine_t)multi_adv_thread, (void*)&max_count)) != 0) {
+		if ((ret = pthread_create(&pid, NULL, (pthread_startroutine_t)multi_adv_thread, (void*)&interval)) != 0) {
 			printf("%s: pthread_create failed, status=%d\n", __func__, ret);
 		} else {
 			pthread_detach(pid);
