@@ -1155,7 +1155,7 @@ int ble_rmc_main(int argc, char *argv[])
 			RMC_LOG(RMC_SERVER_TAG, "Stop adv ... ok\n");
 		}
 
-		if (argc == 4 && strncmp(argv[2], "cremuladv", 10) == 0) {
+		if (argc >= 4 && strncmp(argv[2], "cremuladv", 10) == 0) {
 			uint8_t adv_handle = 0;
 			if (argc > 2) {
 				adv_handle = atoi(argv[3]);
@@ -1164,13 +1164,17 @@ int ble_rmc_main(int argc, char *argv[])
 				goto ble_rmc_done;
 			}
 
-			uint32_t adv_interval_int[2] = { 32, 32 };
+			uint32_t adv_interval = 20 * 1.6;
+			if (argc > 5) {
+				adv_interval = atoi(argv[4]) * 1.6;
+			}
+			uint32_t adv_interval_int[2] = { adv_interval, adv_interval };
 			//uint8_t adv_event_prop = 0x01;		//LE_EXT_ADV_EXTENDED_ADV_CONN_UNDIRECTED
 			//uint8_t adv_event_prop = 0x10;		//LE_EXT_ADV_LEGACY_ADV_NON_SCAN_NON_CONN_UNDIRECTED
 			//uint8_t adv_event_prop = 0x12;		//LE_EXT_ADV_LEGACY_ADV_SCAN_UNDIRECTED
 			uint8_t adv_event_prop = 0x13;			//LE_EXT_ADV_LEGACY_ADV_CONN_SCAN_UNDIRECTED
-			//uint8_t adv_addr_type = 0;			//RTK_BT_LE_ADDR_TYPE_PUBLIC
-			uint8_t adv_addr_type = 1;				//RTK_BT_LE_ADDR_TYPE_RANDOM
+			uint8_t adv_addr_type = 0;			//RTK_BT_LE_ADDR_TYPE_PUBLIC
+			//uint8_t adv_addr_type = 1;				//RTK_BT_LE_ADDR_TYPE_RANDOM
 			uint8_t adv_addr[BLE_BD_ADDR_MAX_LEN] = { 0 };
 			memcpy(adv_addr, def_ext_addr_val, BLE_BD_ADDR_MAX_LEN);
 
