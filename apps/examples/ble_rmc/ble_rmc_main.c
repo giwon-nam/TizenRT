@@ -1165,7 +1165,7 @@ int ble_rmc_main(int argc, char *argv[])
 			}
 
 			uint32_t adv_interval = 20 * 1.6;
-			if (argc > 5) {
+			if (argc >= 5) {
 				adv_interval = atoi(argv[4]) * 1.6;
 			}
 			uint32_t adv_interval_int[2] = { adv_interval, adv_interval };
