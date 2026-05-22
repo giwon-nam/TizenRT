@@ -463,27 +463,30 @@ static void hal_ble_evt_thread(void)
 
             case EVT_BLE_PAIRING_NUMBER_COMPARE_REQ_MSG:
             {
-                ble_auth_key_cfm_t *key_cfm_ind = (typeof(key_cfm_ind))msg.u.buf;
-                hal_ble_conn_t *info = (hal_ble_conn_t *)le_get_conn_info_ext(key_cfm_ind->con_idx);
-
-                LOGD("EVT_BLE_PAIRING_NUMBER_COMPARE_REQ_MSG conn_idx:%d, passkey:%06d", key_cfm_ind->con_idx, key_cfm_ind->passkey);
-
-                if (!info)
+                if (msg.u.buf)
                 {
-                    LOGE("can't find conn info by %d", key_cfm_ind->con_idx);
-                    break;
-                }
+                    ble_auth_key_cfm_t *key_cfm_ind = (typeof(key_cfm_ind))msg.u.buf;
+                    hal_ble_conn_t *info = (hal_ble_conn_t *)le_get_conn_info_ext(key_cfm_ind->con_idx);
 
-                if (info->role == LINK_ROLE_MASTER && bktr_ble_client_get_param()->trble_device_passkey_display_cb)
-                {
-                    bktr_ble_client_get_param()->trble_device_passkey_display_cb(key_cfm_ind->passkey, key_cfm_ind->con_idx);
-                }
-                else if (info->role == LINK_ROLE_SLAVE)
-                {
-                    bk_tr_ble_server_report_passkey_evt(key_cfm_ind->con_idx, key_cfm_ind->passkey);
-                }
+                    LOGD("EVT_BLE_PAIRING_NUMBER_COMPARE_REQ_MSG conn_idx:%d, passkey:%06d", key_cfm_ind->con_idx, key_cfm_ind->passkey);
 
-                os_free(key_cfm_ind);
+                    if (!info)
+                    {
+                        LOGE("can't find conn info by %d", key_cfm_ind->con_idx);
+                        break;
+                    }
+
+                    if (info->role == LINK_ROLE_MASTER && bktr_ble_client_get_param()->trble_device_passkey_display_cb)
+                    {
+                        bktr_ble_client_get_param()->trble_device_passkey_display_cb(key_cfm_ind->passkey, key_cfm_ind->con_idx);
+                    }
+                    else if (info->role == LINK_ROLE_SLAVE)
+                    {
+                        bk_tr_ble_server_report_passkey_evt(key_cfm_ind->con_idx, key_cfm_ind->passkey);
+                    }
+
+                    os_free(key_cfm_ind);
+                }
             }
             break;
 
@@ -912,8 +915,17 @@ static void hal_ble_cmd_thread(void)
             case CMD_BLE_CREATE_ADV:
             {
                 ble_cmd_msg_elem_t *elem = (typeof(elem))msg.param;
-                uint8_t adv_index = bk_ble_get_idle_actv_idx_handle();
+                uint8_t adv_index;
                 int8_t hal_adv_index = -1;
+
+                if (!elem)
+                {
+                    LOGE("CMD_BLE_CREATE_ADV elem null !");
+                    ret_status = -1;
+                    break;
+                }
+
+                adv_index = bk_ble_get_idle_actv_idx_handle();
 
                 if (adv_index == 0xff)
                 {
@@ -1668,20 +1680,20 @@ static void bk_adapter_ble_notice_cb(ble_notice_t notice, void *param)
         ble_smp_ind_t *s_ind = (ble_smp_ind_t *)param;
         LOGI("BLE_5_PARING_NUMBER_COMPARE_REQ_EVENT conn_idx:%d, passkey:%06d ", s_ind->conn_idx, s_ind->num);
         ble_auth_key_cfm_t *key_cfm_ind = os_zalloc(sizeof(ble_auth_key_cfm_t));
+
+        if (!key_cfm_ind)
+        {
+            LOGE("key_cfm_ind malloc fail ");
+            break;
+        }
+
         key_cfm_ind->con_idx = s_ind->conn_idx;
         key_cfm_ind->passkey = s_ind->num;
 
-        if (key_cfm_ind)
+        if (ble_evt_queue_push(EVT_BLE_PAIRING_NUMBER_COMPARE_REQ_MSG, key_cfm_ind) != 0)
         {
-            if (ble_evt_queue_push(EVT_BLE_PAIRING_NUMBER_COMPARE_REQ_MSG, key_cfm_ind) != 0)
-            {
-                LOGE("ble_evt_queue_push failed ");
-                os_free(key_cfm_ind);
-            }
-        }
-        else
-        {
-            LOGE("key_cfm_ind malloc fail ");
+            LOGE("ble_evt_queue_push failed ");
+            os_free(key_cfm_ind);
         }
     }
     break;
