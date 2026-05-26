@@ -492,98 +492,116 @@ static void hal_ble_evt_thread(void)
 
             case EVT_BLE_SERVER_CONNECTED:
             {
-                ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
-
-                if (bktr_ble_server_get_param()->connected_cb)
+                if (msg.u.buf)
                 {
-                    bktr_ble_server_get_param()->connected_cb(elem->server_connect_evt.conn_idx, elem->server_connect_evt.type,
-                            elem->server_connect_evt.peer_addr, elem->server_connect_evt.relate_adv_handle);
+                    ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
+
+                    if (bktr_ble_server_get_param()->connected_cb)
+                    {
+                        bktr_ble_server_get_param()->connected_cb(elem->server_connect_evt.conn_idx, elem->server_connect_evt.type,
+                                elem->server_connect_evt.peer_addr, elem->server_connect_evt.relate_adv_handle);
+                    }
                 }
             }
             break;
 
             case EVT_BLE_SERVER_DISCONNECT:
             {
-                ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
-
-                if (bktr_ble_server_get_param()->disconnected_cb)
+                if (msg.u.buf)
                 {
-                    bktr_ble_server_get_param()->disconnected_cb(elem->server_disconnect_evt.conn_idx, elem->server_disconnect_evt.reason);
+                    ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
+
+                    if (bktr_ble_server_get_param()->disconnected_cb)
+                    {
+                        bktr_ble_server_get_param()->disconnected_cb(elem->server_disconnect_evt.conn_idx, elem->server_disconnect_evt.reason);
+                    }
                 }
             }
             break;
 
             case EVT_BLE_SERVER_MTU_CHANGE:
             {
-                ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
-
-                if (bktr_ble_server_get_param()->mtu_update_cb)
+                if (msg.u.buf)
                 {
-                    bktr_ble_server_get_param()->mtu_update_cb(elem->mtu_change_evt.conn_idx, elem->mtu_change_evt.mtu);
+                    ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
+
+                    if (bktr_ble_server_get_param()->mtu_update_cb)
+                    {
+                        bktr_ble_server_get_param()->mtu_update_cb(elem->mtu_change_evt.conn_idx, elem->mtu_change_evt.mtu);
+                    }
                 }
             }
             break;
 
             case EVT_BLE_SERVER_PASSKEY:
             {
-                ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
-
-                if (bktr_ble_server_get_param()->passkey_display_cb)
+                if (msg.u.buf)
                 {
-                    bktr_ble_server_get_param()->passkey_display_cb(elem->passkey_evt.passkey, elem->passkey_evt.conn_idx);
+                    ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
+
+                    if (bktr_ble_server_get_param()->passkey_display_cb)
+                    {
+                        bktr_ble_server_get_param()->passkey_display_cb(elem->passkey_evt.passkey, elem->passkey_evt.conn_idx);
+                    }
                 }
             }
             break;
 
             case EVT_BLE_SERVER_ATTR_CB:
             {
-                ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
-
-                if (elem->attr_cb_evt.tmp_buffer && elem->attr_cb_evt.tmp_buffer_len)
+                if (msg.u.buf)
                 {
-                    uint8_t *current_buffer = NULL;
-                    uint16_t current_buffer_len = 0;
-                    uint16_t current_buffer_max_len = 0;
+                    ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
 
-                    bk_tr_ble_server_attr_get_data_ptr(elem->attr_cb_evt.handle, &current_buffer, &current_buffer_len, &current_buffer_max_len);
-
-                    if (current_buffer && current_buffer_max_len)
+                    if (elem->attr_cb_evt.tmp_buffer && elem->attr_cb_evt.tmp_buffer_len)
                     {
-                        uint16_t final_len = (current_buffer_max_len < elem->attr_cb_evt.tmp_buffer_len ? current_buffer_max_len : elem->attr_cb_evt.tmp_buffer_len);
-                        os_memcpy(current_buffer, elem->attr_cb_evt.tmp_buffer, final_len);
-                        bk_tr_ble_server_attr_set_data_ptr_private(elem->attr_cb_evt.service_p, elem->attr_cb_evt.att_index,
-                                current_buffer, final_len, current_buffer_max_len);
+                        uint8_t *current_buffer = NULL;
+                        uint16_t current_buffer_len = 0;
+                        uint16_t current_buffer_max_len = 0;
+
+                        bk_tr_ble_server_attr_get_data_ptr(elem->attr_cb_evt.handle, &current_buffer, &current_buffer_len, &current_buffer_max_len);
+
+                        if (current_buffer && current_buffer_max_len)
+                        {
+                            uint16_t final_len = (current_buffer_max_len < elem->attr_cb_evt.tmp_buffer_len ? current_buffer_max_len : elem->attr_cb_evt.tmp_buffer_len);
+                            os_memcpy(current_buffer, elem->attr_cb_evt.tmp_buffer, final_len);
+                            bk_tr_ble_server_attr_set_data_ptr_private(elem->attr_cb_evt.service_p, elem->attr_cb_evt.att_index,
+                                    current_buffer, final_len, current_buffer_max_len);
+                        }
                     }
-                }
 
-                if (elem->attr_cb_evt.tmp_buffer && elem->attr_cb_evt.tmp_buffer_len)
-                {
-                    os_free(elem->attr_cb_evt.tmp_buffer);
-                    elem->attr_cb_evt.tmp_buffer = NULL;
-                    elem->attr_cb_evt.tmp_buffer_len = 0;
-                }
+                    if (elem->attr_cb_evt.tmp_buffer && elem->attr_cb_evt.tmp_buffer_len)
+                    {
+                        os_free(elem->attr_cb_evt.tmp_buffer);
+                        elem->attr_cb_evt.tmp_buffer = NULL;
+                        elem->attr_cb_evt.tmp_buffer_len = 0;
+                    }
 
-                if (elem->attr_cb_evt.cb)
-                {
-                    elem->attr_cb_evt.cb(elem->attr_cb_evt.type,
-                                         elem->attr_cb_evt.con_handle,
-                                         elem->attr_cb_evt.handle,
-                                         elem->attr_cb_evt.arg,
-                                         elem->attr_cb_evt.result,
-                                         elem->attr_cb_evt.pending);
+                    if (elem->attr_cb_evt.cb)
+                    {
+                        elem->attr_cb_evt.cb(elem->attr_cb_evt.type,
+                                             elem->attr_cb_evt.con_handle,
+                                             elem->attr_cb_evt.handle,
+                                             elem->attr_cb_evt.arg,
+                                             elem->attr_cb_evt.result,
+                                             elem->attr_cb_evt.pending);
+                    }
                 }
             }
             break;
 
             case EVT_BLE_SERVER_SET_BUFFER:
             {
-                ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
+                if (msg.u.buf)
+                {
+                    ble_evt_msg_elem_t *elem = (typeof(elem))msg.u.buf;
 
-                bk_tr_ble_server_attr_set_data_ptr_private(elem->set_server_buffer_cmd.service_p,
-                        elem->set_server_buffer_cmd.att_index,
-                        elem->set_server_buffer_cmd.buffer,
-                        elem->set_server_buffer_cmd.buffer_len,
-                        elem->set_server_buffer_cmd.buffer_max_len);
+                    bk_tr_ble_server_attr_set_data_ptr_private(elem->set_server_buffer_cmd.service_p,
+                            elem->set_server_buffer_cmd.att_index,
+                            elem->set_server_buffer_cmd.buffer,
+                            elem->set_server_buffer_cmd.buffer_len,
+                            elem->set_server_buffer_cmd.buffer_max_len);
+                }
             }
             break;
 
