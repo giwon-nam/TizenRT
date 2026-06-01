@@ -42,6 +42,11 @@ static ble_addr g_target = { 0, };
 static ble_client_ctx *ctx_list[RMC_MAX_CONNECTION] = { 0, };
 static int ctx_count = 0;
 
+static uint16_t g_rmc_profile_count;
+static ble_device_connected_list g_rmc_conn_list;
+static bool g_rmc_is_active;
+static char g_rmc_device_name[BLE_GAP_DEVICE_NAME_LEN];
+
 static char *client_state_str[] = {
 	"\x1b[35mNONE\x1b[0m",
 	"\x1b[35mIDLE\x1b[0m",
@@ -744,6 +749,84 @@ int ble_rmc_main(int argc, char *argv[])
 
 		RMC_LOG(RMC_CLIENT_TAG, "BLE mac : %02x:%02x:%02x:%02x:%02x:%02x\n",
 			mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+	}
+
+	/*
+	 * [ LWNL direct-pointer API test ] Usage :
+	 * TASH>> ble_rmc srvconfig          - re-apply server GATT config (tests set_server_config)
+	 * TASH>> ble_rmc devname MyDevice   - set GAP device name
+	 * TASH>> ble_rmc profile            - get GATT profile count
+	 * TASH>> ble_rmc connlist           - list connected client handles
+	 * TASH>> ble_rmc active any         - check if any connection is active
+	 * TASH>> ble_rmc active <handle>    - check if conn_handle is active
+	 * TASH>> ble_rmc advint <interval>  - set legacy adv interval
+	 */
+	if (strncmp(argv[1], "srvconfig", 10) == 0) {
+		ret = ble_manager_set_server_config(&server_config);
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_SERVER_TAG, "set server config fail[%d]\n", ret);
+			goto ble_rmc_done;
+		}
+		RMC_LOG(RMC_SERVER_TAG, "set server config ... ok\n");
+	}
+
+	if (strncmp(argv[1], "devname", 8) == 0) {
+		if (argc < 3) {
+			RMC_LOG(RMC_TAG, "Usage: ble_rmc devname <name>\n");
+			goto ble_rmc_done;
+		}
+		memset(g_rmc_device_name, 0, sizeof(g_rmc_device_name));
+		strncpy(g_rmc_device_name, argv[2], BLE_GAP_DEVICE_NAME_LEN - 1);
+		ret = ble_manager_set_gap_device_name(g_rmc_device_name);
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_TAG, "set device name fail[%d]\n", ret);
+			goto ble_rmc_done;
+		}
+		RMC_LOG(RMC_TAG, "set device name [%s] ... ok\n", g_rmc_device_name);
+	}
+
+	if (strncmp(argv[1], "profile", 8) == 0) {
+		g_rmc_profile_count = 0;
+		ret = ble_server_get_profile_count(&g_rmc_profile_count);
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_SERVER_TAG, "get profile count fail[%d]\n", ret);
+			goto ble_rmc_done;
+		}
+		RMC_LOG(RMC_SERVER_TAG, "profile count : %u\n", g_rmc_profile_count);
+	}
+
+	if (strncmp(argv[1], "connlist", 9) == 0) {
+		int i;
+
+		memset(&g_rmc_conn_list, 0, sizeof(g_rmc_conn_list));
+		ret = ble_client_connected_device_list(&g_rmc_conn_list);
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_CLIENT_TAG, "connected device list fail[%d]\n", ret);
+			goto ble_rmc_done;
+		}
+		RMC_LOG(RMC_CLIENT_TAG, "connected count : %u\n", g_rmc_conn_list.connected_count);
+		for (i = 0; i < g_rmc_conn_list.connected_count; i++) {
+			RMC_LOG(RMC_CLIENT_TAG, "  handle[%d] : %u\n", i, g_rmc_conn_list.conn_handle[i]);
+		}
+	}
+
+	if (strncmp(argv[1], "active", 7) == 0) {
+		if (argc < 3) {
+			RMC_LOG(RMC_TAG, "Usage: ble_rmc active any | ble_rmc active <handle>\n");
+			goto ble_rmc_done;
+		}
+		g_rmc_is_active = false;
+		if (strncmp(argv[2], "any", 4) == 0) {
+			ret = ble_manager_conn_is_any_active(&g_rmc_is_active);
+		} else {
+			ble_conn_handle conn_handle = (ble_conn_handle)atoi(argv[2]);
+			ret = ble_manager_conn_is_active(conn_handle, &g_rmc_is_active);
+		}
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_CLIENT_TAG, "conn is active check fail[%d]\n", ret);
+			goto ble_rmc_done;
+		}
+		RMC_LOG(RMC_CLIENT_TAG, "is_active : %s\n", g_rmc_is_active ? "true" : "false");
 	}
 
 	if (strncmp(argv[1], "whitelist", 10) == 0) {
