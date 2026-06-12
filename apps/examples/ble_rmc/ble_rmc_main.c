@@ -570,6 +570,11 @@ bool hexdata_str_to_bd_addr(char *str, uint8_t *addr_buf, uint8_t buf_len)
 	return true;
 }
 
+static uint16_t g_rmc_profile_count;
+static ble_device_connected_list g_rmc_conn_list;
+static bool g_rmc_is_active;
+static char g_rmc_device_name[BLE_GAP_DEVICE_NAME_LEN];
+
 /****************************************************************************
  * ble_rmc_main
  ****************************************************************************/
@@ -673,6 +678,21 @@ int ble_rmc_main(int argc, char *argv[])
 		if (ret == 0) {
 			RMC_LOG(RMC_CLIENT_TAG, "Re-Connect Success [ID : %d]\n", ctx_count);
 			ctx_list[ctx_count++] = ctx;
+		}
+	}
+
+	if (strncmp(argv[1], "connlist", 9) == 0) {
+		int i;
+
+		memset(&g_rmc_conn_list, 0, sizeof(g_rmc_conn_list));
+		ret = ble_client_connected_device_list(&g_rmc_conn_list);
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_CLIENT_TAG, "connected device list fail[%d]\n", ret);
+			goto ble_rmc_done;
+		}
+		RMC_LOG(RMC_CLIENT_TAG, "connected count : %u\n", g_rmc_conn_list.connected_count);
+		for (i = 0; i < g_rmc_conn_list.connected_count; i++) {
+			RMC_LOG(RMC_CLIENT_TAG, "  handle[%d] : %u\n", i, g_rmc_conn_list.conn_handle[i]);
 		}
 	}
 

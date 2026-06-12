@@ -65,7 +65,7 @@
 #define BLE_WRITE_RESP 0
 #define BLE_WRITE_NORESP 1
 
-#define BLE_MAX_MTU 247
+#define BLE_MAX_MTU 512
 
 #define BLE_TESTER_MQ_SIZE 2
 #define BLE_TESTER_MQ_NAME "ble_tester"
@@ -283,7 +283,7 @@ static void utc_cb_desc_b_1(ble_server_attr_cb_type_e type, ble_conn_handle conn
 }
 
 static void ble_peri_cb_charact_rmc_sync(ble_server_attr_cb_type_e type, ble_conn_handle conn_handle, ble_attr_handle attr_handle, void* arg) {
-	uint8_t buf[256] = { 0, };
+	uint8_t buf[512] = { 0, };
 	ble_data data = { buf, sizeof(buf) };
 	ble_result_e ret = ble_server_attr_get_data(attr_handle, &data);
 	if (ret != BLE_MANAGER_SUCCESS) {
@@ -409,8 +409,8 @@ static int ble_connect_common(bool is_auto)
 	memcpy(conn_info.addr.mac, g_target.mac, BLE_BD_ADDR_MAX_LEN);
 	RMC_LOG(RMC_CLIENT_TAG, "BLE mac type : %d\n", g_target.type);
 	conn_info.addr.type = g_target.type;
-	conn_info.conn_interval = 8;
-	conn_info.slave_latency = 12;
+	conn_info.conn_interval = 9;
+	conn_info.slave_latency = 0;
 	conn_info.mtu = BLE_MAX_MTU;
 	conn_info.scan_timeout = conn_timeout * 1000;
 	conn_info.is_secured_connect = true;
@@ -590,7 +590,7 @@ static int ble_write_test(int mode)
 
 	ble_attr_handle attr_handle = BLE_APP_HANDLE_CHAR_RMC_SYNC + 1;
 	ble_data packet[1] = { 0, };
-	uint8_t packet_data[256] = { 0, };
+	uint8_t packet_data[512] = { 0, };
 	
 	int i;
 	int send_ok = 0;
@@ -600,9 +600,18 @@ static int ble_write_test(int mode)
 
 	ioctl(frt_fd, TCIOC_GETSTATUS, (unsigned long)(uintptr_t)&before);
 	for (i = 0; i < g_packet_count; i++) { 
-		packet_data[0] = i + 1;
+		packet_data[0] = i + 100;
 		packet_data[1] = g_packet_count;
-		packet_data[g_packet_size - 1] = i + 1;
+		packet_data[g_packet_size - 1] = i + 100;
+
+		if (i == 0) {
+			packet_data[0] = 11;
+			packet_data[g_packet_size - 1] = 11;
+		} else if (i == g_packet_count - 1) {
+			packet_data[0] = 99;
+			packet_data[g_packet_size - 1] = 99;
+		}
+
 		if (mode == BLE_WRITE_NORESP) {
 			ret = ble_client_operation_write_no_response(g_ctx, attr_handle, packet);
 		} else {
@@ -950,6 +959,14 @@ int ble_tester_main(int argc, char *argv[])
 
 			ble_change_adv_interval(SET_ADV_INTERVAL_BALANCED);
 			
+			ble_write_test(BLE_WRITE_RESP);
+		} else if (strncmp(argv[1], "test8", 6) == 0) {
+			ble_prepare_test();
+
+			ble_write_test(BLE_WRITE_NORESP);
+		} else if (strncmp(argv[1], "test9", 6) == 0) {
+			ble_prepare_test();
+
 			ble_write_test(BLE_WRITE_RESP);
 		} else if (strncmp(argv[1], "noti", 5) == 0) {
 			ble_data packet;

@@ -41,8 +41,8 @@
 #define BLE_APP_HANDLE_DESC_RMC_KEY (0x0076)
 #define BLE_APP_HANDLE_SERVICE_2 (0x0077)
 #define BLE_APP_HANDLE_CHAR_RMC_SYNC (0x0078)
-#define BLE_MAX_MTU 240
-#define MAX_PACKET_COUNT 100
+#define BLE_MAX_MTU 512
+#define MAX_PACKET_COUNT 200
 #define MAX_PACKET_SIZE BLE_MAX_MTU - 3; // 237 bytes
 #define FIRST_PACKET 11
 #define NEXT_PACKET 55
@@ -187,7 +187,7 @@ static int perfs_ble_get_result(void)
 
 static void ble_peri_cb_charact_rmc_sync(ble_server_attr_cb_type_e type, ble_conn_handle conn_handle, ble_attr_handle attr_handle, void* arg, uint16_t result, uint16_t pending)
 {
-	uint8_t buf[256] = { 0, };
+	uint8_t buf[512] = { 0, };
 	ble_data blue_data = { buf, sizeof(buf) };
 	struct perfs_data_t *p_data = (struct perfs_data_t *)arg;
 
