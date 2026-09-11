@@ -25,9 +25,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <pthread.h>
 #include <ble_manager/ble_manager.h>
 #include <semaphore.h>
+#include <fcntl.h>
+#include <mqueue.h>
 #include <errno.h>
 
 #define RMC_TAG "\x1b[33m[RMC]\x1b[0m"
@@ -35,12 +38,55 @@
 #define RMC_SERVER_TAG "\x1b[36m[RMC SERVER]\x1b[0m"
 #define RMC_LOG(tag, fmt, args...) printf(tag fmt, ##args)
 #define RMC_MAX_CONNECTION 3
+#define RMC_SCAN_REPEAT_MQ_NAME "/ble_rmc_scan_repeat"
+#define RMC_SCAN_REPEAT_QUEUE_SIZE 5
+#define RMC_SCAN_REPEAT_DEFAULT_DURATION_MS 3000
+#define RMC_SCAN_REPEAT_COUNT_LOG_INTERVAL_MS 1000
+#define RMC_SCAN_INTERVAL 6554
+#define RMC_SCAN_WINDOW 6554
+#define RMC_SCAN_TYPE_ACTIVE 1
+
+typedef enum {
+	RMC_SCAN_REPEAT_DEVICE_SCANNED,
+	RMC_SCAN_REPEAT_STATE_CHANGED,
+	RMC_SCAN_REPEAT_EXIT,
+} rmc_scan_repeat_event_e;
+
+typedef struct {
+	rmc_scan_repeat_event_e type;
+	union {
+		ble_scanned_device *scanned_device;
+		ble_scan_state_e scan_state;
+	} data;
+} rmc_scan_repeat_event_t;
 
 static int g_scan_done = 0;
 static int g_scan_state = -1;
 static ble_addr g_target = { 0, };
 static ble_client_ctx *ctx_list[RMC_MAX_CONNECTION] = { 0, };
 static int ctx_count = 0;
+static mqd_t g_scan_repeat_mq = (mqd_t)-1;
+static pthread_t g_scan_repeat_worker_thread;
+static pthread_t g_scan_repeat_start_thread;
+static sem_t g_scan_repeat_start_sem;
+static bool g_scan_repeat_worker_created = false;
+static bool g_scan_repeat_start_thread_created = false;
+static bool g_scan_repeat_start_sem_initialized = false;
+static volatile bool g_scan_repeat_running = false;
+static uint32_t g_scan_repeat_duration_ms = RMC_SCAN_REPEAT_DEFAULT_DURATION_MS;
+static uint64_t g_scan_repeat_deadline_ms = 0;
+static uint32_t g_scan_repeat_count = 0;
+static uint32_t g_scan_repeat_callback_count = 0;
+static uint64_t g_scan_repeat_callback_count_started_ms = 0;
+
+static void ble_scan_state_changed_cb_for_repeat(ble_scan_state_e scan_state);
+static void ble_device_scanned_cb_for_repeat(ble_scanned_device *scanned_device);
+static void scan_repeat_stop(void);
+
+static ble_scan_callback_list g_scan_repeat_config = {
+	ble_scan_state_changed_cb_for_repeat,
+	ble_device_scanned_cb_for_repeat,
+};
 
 static char *client_state_str[] = {
 	"\x1b[35mNONE\x1b[0m",
@@ -525,6 +571,298 @@ static void set_scan_filter(ble_scan_filter *filter, uint8_t *raw_data, uint8_t 
 	filter->whitelist_enable = whitelist_enable;
 }
 
+static uint64_t scan_repeat_get_time_ms(void)
+{
+	struct timespec time = {
+		0,
+	};
+	if (clock_gettime(CLOCK_MONOTONIC, &time) != 0) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat get time fail[%d]\n", errno);
+		return 0;
+	}
+	return ((uint64_t)time.tv_sec * 1000) + ((uint64_t)time.tv_nsec / 1000000);
+}
+
+static bool scan_repeat_enqueue(rmc_scan_repeat_event_t *event)
+{
+	mqd_t mq = mq_open(RMC_SCAN_REPEAT_MQ_NAME, O_WRONLY);
+	if (mq == (mqd_t)-1) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat queue open fail[%d]\n", errno);
+		return false;
+	}
+
+	int ret = mq_send(mq, (const char *)event, sizeof(rmc_scan_repeat_event_t), 0);
+	if (ret < 0) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat enqueue fail[%d]\n", errno);
+	}
+	mq_close(mq);
+	return ret == 0;
+}
+
+static void scan_repeat_log_device_count(void)
+{
+	uint64_t now_ms = scan_repeat_get_time_ms();
+	if (now_ms == 0) {
+		return;
+	}
+
+	g_scan_repeat_callback_count++;
+	if (g_scan_repeat_callback_count_started_ms == 0) {
+		g_scan_repeat_callback_count_started_ms = now_ms;
+		return;
+	}
+
+	if (now_ms - g_scan_repeat_callback_count_started_ms < RMC_SCAN_REPEAT_COUNT_LOG_INTERVAL_MS) {
+		return;
+	}
+
+	RMC_LOG(RMC_CLIENT_TAG, "scan repeat device scanned count[%u]\n", g_scan_repeat_callback_count);
+	g_scan_repeat_callback_count = 0;
+	g_scan_repeat_callback_count_started_ms = now_ms;
+}
+
+static void ble_scan_state_changed_cb_for_repeat(ble_scan_state_e scan_state)
+{
+	if (!g_scan_repeat_running) {
+		return;
+	}
+
+	rmc_scan_repeat_event_t event = {
+		.type = RMC_SCAN_REPEAT_STATE_CHANGED,
+		.data.scan_state = scan_state,
+	};
+	RMC_LOG(RMC_CLIENT_TAG, "scan repeat enqueue state[%d]\n", scan_state);
+	scan_repeat_enqueue(&event);
+}
+
+static void ble_device_scanned_cb_for_repeat(ble_scanned_device *scanned_device)
+{
+	if (!g_scan_repeat_running || scanned_device == NULL) {
+		return;
+	}
+
+	rmc_scan_repeat_event_t event = {
+		.type = RMC_SCAN_REPEAT_DEVICE_SCANNED,
+	};
+	event.data.scanned_device = (ble_scanned_device *)malloc(sizeof(ble_scanned_device));
+	if (event.data.scanned_device == NULL) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat device copy allocation fail\n");
+		return;
+	}
+	memcpy(event.data.scanned_device, scanned_device, sizeof(ble_scanned_device));
+	if (!scan_repeat_enqueue(&event)) {
+		free(event.data.scanned_device);
+	}
+}
+
+static ble_result_e scan_repeat_start_scan(void)
+{
+	uint64_t started_ms = scan_repeat_get_time_ms();
+	if (started_ms == 0) {
+		return BLE_MANAGER_FAIL;
+	}
+
+	g_scan_repeat_callback_count = 0;
+	g_scan_repeat_callback_count_started_ms = 0;
+	ble_result_e ret = ble_client_set_scan(RMC_SCAN_INTERVAL, RMC_SCAN_WINDOW,
+										   RMC_SCAN_TYPE_ACTIVE);
+	RMC_LOG(RMC_CLIENT_TAG, "scan repeat set scan, interval[%u], window[%u], type[%u], ret[%d]\n",
+			RMC_SCAN_INTERVAL, RMC_SCAN_WINDOW, RMC_SCAN_TYPE_ACTIVE, ret);
+	if (ret != BLE_MANAGER_SUCCESS) {
+		return ret;
+	}
+
+	ble_scan_filter filter = {
+		0,
+	};
+	filter.scan_duration = g_scan_repeat_duration_ms;
+	g_scan_repeat_count++;
+
+	ret = ble_client_start_scan(&filter, &g_scan_repeat_config);
+	if (ret == BLE_MANAGER_SUCCESS) {
+		g_scan_repeat_deadline_ms = started_ms + g_scan_repeat_duration_ms;
+	}
+	RMC_LOG(RMC_CLIENT_TAG, "scan repeat start[%u], duration[%ums], ret[%d]\n",
+			g_scan_repeat_count, g_scan_repeat_duration_ms, ret);
+	return ret;
+}
+
+static void *scan_repeat_start_worker(void *arg)
+{
+	(void)arg;
+	while (g_scan_repeat_running) {
+		int ret;
+		do {
+			ret = sem_wait(&g_scan_repeat_start_sem);
+		} while (ret < 0 && errno == EINTR);
+
+		if (ret < 0) {
+			RMC_LOG(RMC_CLIENT_TAG, "scan repeat start wait fail[%d]\n", errno);
+			g_scan_repeat_running = false;
+			break;
+		}
+		if (!g_scan_repeat_running) {
+			break;
+		}
+
+		if (scan_repeat_start_scan() != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_CLIENT_TAG, "scan repeat stopped: next scan start failed\n");
+			g_scan_repeat_running = false;
+			break;
+		}
+	}
+	return NULL;
+}
+
+static void *scan_repeat_worker(void *arg)
+{
+	(void)arg;
+	rmc_scan_repeat_event_t event;
+	while (true) {
+		ssize_t size = mq_receive(g_scan_repeat_mq, (char *)&event, sizeof(event), NULL);
+		if (size < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			RMC_LOG(RMC_CLIENT_TAG, "scan repeat dequeue fail[%d]\n", errno);
+			break;
+		}
+
+		if (event.type == RMC_SCAN_REPEAT_EXIT) {
+			break;
+		}
+		if (!g_scan_repeat_running) {
+			if (event.type == RMC_SCAN_REPEAT_DEVICE_SCANNED) {
+				free(event.data.scanned_device);
+			}
+			continue;
+		}
+
+		if (event.type == RMC_SCAN_REPEAT_DEVICE_SCANNED) {
+			uint64_t now_ms = scan_repeat_get_time_ms();
+			if (now_ms == 0) {
+				now_ms = g_scan_repeat_deadline_ms;
+			}
+			if (now_ms >= g_scan_repeat_deadline_ms) {
+				RMC_LOG(RMC_CLIENT_TAG,
+						"scan repeat handle device after timeout, now[%llu], deadline[%llu]\n",
+						(unsigned long long)now_ms, (unsigned long long)g_scan_repeat_deadline_ms);
+				ble_result_e ret = ble_client_stop_scan();
+				RMC_LOG(RMC_CLIENT_TAG, "scan repeat stop from device handler, ret[%d]\n", ret);
+			} else {
+				scan_repeat_log_device_count();
+			}
+			free(event.data.scanned_device);
+			continue;
+		}
+
+		g_scan_state = event.data.scan_state;
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat handle state[%d]\n", g_scan_state);
+		if (g_scan_state == BLE_SCAN_STOPPED && sem_post(&g_scan_repeat_start_sem) < 0) {
+			RMC_LOG(RMC_CLIENT_TAG, "scan repeat start signal fail[%d]\n", errno);
+		}
+	}
+	g_scan_repeat_running = false;
+	sem_post(&g_scan_repeat_start_sem);
+	return NULL;
+}
+
+static bool scan_repeat_start(uint32_t duration_ms)
+{
+	if (g_scan_repeat_worker_created) {
+		if (g_scan_repeat_running) {
+			RMC_LOG(RMC_CLIENT_TAG, "scan repeat is already running\n");
+			return false;
+		}
+		scan_repeat_stop();
+	}
+
+	struct mq_attr attr = {
+		.mq_maxmsg = RMC_SCAN_REPEAT_QUEUE_SIZE,
+		.mq_msgsize = sizeof(rmc_scan_repeat_event_t),
+		.mq_flags = 0,
+	};
+	mq_unlink(RMC_SCAN_REPEAT_MQ_NAME);
+	g_scan_repeat_mq = mq_open(RMC_SCAN_REPEAT_MQ_NAME, O_RDONLY | O_CREAT, 0666, &attr);
+	if (g_scan_repeat_mq == (mqd_t)-1) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat queue create fail[%d]\n", errno);
+		return false;
+	}
+
+	if (sem_init(&g_scan_repeat_start_sem, 0, 0) < 0) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat start semaphore init fail[%d]\n", errno);
+		mq_close(g_scan_repeat_mq);
+		mq_unlink(RMC_SCAN_REPEAT_MQ_NAME);
+		g_scan_repeat_mq = (mqd_t)-1;
+		return false;
+	}
+	g_scan_repeat_start_sem_initialized = true;
+
+	g_scan_repeat_duration_ms = duration_ms;
+	g_scan_repeat_count = 0;
+	g_scan_repeat_callback_count = 0;
+	g_scan_repeat_callback_count_started_ms = 0;
+	g_scan_repeat_running = true;
+	int ret = pthread_create(&g_scan_repeat_worker_thread, NULL, scan_repeat_worker, NULL);
+	if (ret != 0) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat worker create fail[%d]\n", ret);
+		g_scan_repeat_running = false;
+		sem_destroy(&g_scan_repeat_start_sem);
+		g_scan_repeat_start_sem_initialized = false;
+		mq_close(g_scan_repeat_mq);
+		mq_unlink(RMC_SCAN_REPEAT_MQ_NAME);
+		g_scan_repeat_mq = (mqd_t)-1;
+		return false;
+	}
+	g_scan_repeat_worker_created = true;
+
+	ret = scan_repeat_start_scan();
+	if (ret != BLE_MANAGER_SUCCESS) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat setup fail[%d]\n", ret);
+		scan_repeat_stop();
+		return false;
+	}
+
+	ret = pthread_create(&g_scan_repeat_start_thread, NULL, scan_repeat_start_worker, NULL);
+	if (ret != 0) {
+		RMC_LOG(RMC_CLIENT_TAG, "scan repeat start worker create fail[%d]\n", ret);
+		scan_repeat_stop();
+		return false;
+	}
+	g_scan_repeat_start_thread_created = true;
+	return true;
+}
+
+static void scan_repeat_stop(void)
+{
+	if (!g_scan_repeat_worker_created) {
+		return;
+	}
+
+	g_scan_repeat_running = false;
+	ble_result_e ret = ble_client_stop_scan();
+	RMC_LOG(RMC_CLIENT_TAG, "scan repeat stop, ret[%d]\n", ret);
+
+	rmc_scan_repeat_event_t event = {
+		.type = RMC_SCAN_REPEAT_EXIT,
+	};
+	scan_repeat_enqueue(&event);
+	sem_post(&g_scan_repeat_start_sem);
+	if (g_scan_repeat_start_thread_created) {
+		pthread_join(g_scan_repeat_start_thread, NULL);
+		g_scan_repeat_start_thread_created = false;
+	}
+	pthread_join(g_scan_repeat_worker_thread, NULL);
+	if (g_scan_repeat_start_sem_initialized) {
+		sem_destroy(&g_scan_repeat_start_sem);
+		g_scan_repeat_start_sem_initialized = false;
+	}
+	mq_close(g_scan_repeat_mq);
+	mq_unlink(RMC_SCAN_REPEAT_MQ_NAME);
+	g_scan_repeat_mq = (mqd_t)-1;
+	g_scan_repeat_worker_created = false;
+}
+
 static uint8_t ctoi(char c)
 {
 	if ((c >= 'A') && (c <= 'F')) {
@@ -630,6 +968,7 @@ int ble_rmc_main(int argc, char *argv[])
 	}
 
 	if (strncmp(argv[1], "deinit", 7) == 0) {
+		scan_repeat_stop();
 		ret = ble_manager_deinit();
 		ctx_count = 0;
 		RMC_LOG(RMC_CLIENT_TAG, "deinit done[%d]\n", ret);
@@ -814,21 +1153,40 @@ int ble_rmc_main(int argc, char *argv[])
 		}
 	}
 
-	/* 
-	* [ Scan ] Usage :
-	* 1. Normal Scan with MAX Scan Timeout
-	* TASH>> ble_rmc scan 1
-	* 2. Whitelist Scan
-	* TASH>> ble_rmc scan 2 [timer_value]
-	* ( timer_value : optional. this should be in seconds, default : 5s )
-	* 3. Filter Scan
-	* TASH>> ble_rmc scan 3 [timer_value]
-	* ( timer_value : optional. this should be in seconds, default : 5s )
-	* 4. Stop Scan
-	* TASH>> ble_rmc scan
-	*/
+	/*
+	 * [ Scan ] Usage :
+	 * 1. Normal Scan with MAX Scan Timeout
+	 * TASH>> ble_rmc scan 1
+	 * 2. Whitelist Scan
+	 * TASH>> ble_rmc scan 2 [timer_value]
+	 * ( timer_value : optional. this should be in seconds, default : 5s )
+	 * 3. Filter Scan
+	 * TASH>> ble_rmc scan 3 [timer_value]
+	 * ( timer_value : optional. this should be in seconds, default : 5s )
+	 * 4. Repeat Scan with queued callback handling
+	 * TASH>> ble_rmc scan repeat [timer_value]
+	 * TASH>> ble_rmc scan repeat stop
+	 * ( timer_value : optional. this should be in seconds, default : 3s )
+	 * 5. Stop Scan
+	 * TASH>> ble_rmc scan
+	 */
 	if (strncmp(argv[1], "scan", 5) == 0) {
-		if (argc >= 3 && strncmp(argv[2], "1", 2) == 0) {
+		if (argc >= 3 && strncmp(argv[2], "repeat", 7) == 0) {
+			if (argc == 4 && strncmp(argv[3], "stop", 5) == 0) {
+				scan_repeat_stop();
+			} else {
+				uint32_t scan_time = RMC_SCAN_REPEAT_DEFAULT_DURATION_MS / 1000;
+				if (argc == 4) {
+					set_scan_timer(&scan_time, argv[3]);
+				}
+				if (scan_time == 0 || scan_time > SCAN_MAX_TIMEOUT / 1000) {
+					RMC_LOG(RMC_CLIENT_TAG, "scan repeat timer is invalid[%us]\n", scan_time);
+					goto ble_rmc_done;
+				}
+				RMC_LOG(RMC_CLIENT_TAG, "Scan Repeat Start, Timer : %us\n", scan_time);
+				scan_repeat_start(scan_time * 1000);
+			}
+		} else if (argc >= 3 && strncmp(argv[2], "1", 2) == 0) {
 			RMC_LOG(RMC_CLIENT_TAG, "Scan Start without filter !\n");
 			scan_config.device_scanned_cb = ble_device_scanned_cb_for_test;
 			ret = ble_client_start_scan(NULL, &scan_config);
@@ -874,6 +1232,10 @@ int ble_rmc_main(int argc, char *argv[])
 				goto ble_rmc_done;
 			}
 		} else {
+			if (g_scan_repeat_worker_created) {
+				scan_repeat_stop();
+				goto ble_rmc_done;
+			}
 			RMC_LOG(RMC_CLIENT_TAG, "Scan stop\n");
 			ret = ble_client_stop_scan();
 
