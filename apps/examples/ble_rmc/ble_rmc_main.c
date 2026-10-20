@@ -25,8 +25,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/boardctl.h>
 #include <pthread.h>
 #include <ble_manager/ble_manager.h>
+#ifdef CONFIG_WIFI_MANAGER
+#include <wifi_manager/wifi_manager.h>
+#endif
 #include <semaphore.h>
 #include <errno.h>
 
@@ -35,6 +40,22 @@
 #define RMC_SERVER_TAG "\x1b[36m[RMC SERVER]\x1b[0m"
 #define RMC_LOG(tag, fmt, args...) printf(tag fmt, ##args)
 #define RMC_MAX_CONNECTION 3
+
+/* advreboot: timing and adv parameters follow the DA product boot sequence */
+#define RMC_ADV_REBOOT_REINIT_DELAY_S 15	   /* ble_manager_init(NULL) -> iotivity deinit/init */
+#define RMC_ADV_REBOOT_OCF_DELAY_MS 2000	   /* OCInit2 sleep(1) + remaining ocf_manager_init steps */
+#define RMC_ADV_REBOOT_QC_DELAY_S 8			   /* onboarding adv start -> cloud sign-in -> quick control */
+#define RMC_ADV_REBOOT_ONBOARDING_INTERVAL 160 /* 100ms, 0.625ms unit */
+#define RMC_ADV_REBOOT_QC_INTERVAL 240		   /* 150ms */
+#define RMC_ADV_REBOOT_ONBOARDING_AIR_TIME_MS 500
+#define RMC_ADV_REBOOT_QC_AIR_TIME_MS 3500
+#define RMC_ADV_REBOOT_TX_POWER 0x26
+#define RMC_ADV_REBOOT_DATA_LEN 31
+
+typedef enum {
+	RMC_ADV_REBOOT_ONBOARDING,
+	RMC_ADV_REBOOT_QUICK_CONTROL,
+} rmc_adv_reboot_index_e;
 
 static int g_scan_done = 0;
 static int g_scan_state = -1;
@@ -431,6 +452,251 @@ static ble_server_init_config server_config = {
 	gatt_profile, sizeof(gatt_profile) / sizeof(ble_server_gatt_t)
 };
 
+static uint8_t g_adv_reboot_onboarding_adv[RMC_ADV_REBOOT_DATA_LEN] = {
+	0x02, 0x01, 0x04, 0x1B, 0xFF, 0x75, 0x00, 0x42, 0x0C, 0x83};
+static uint8_t g_adv_reboot_onboarding_resp[RMC_ADV_REBOOT_DATA_LEN] = {
+	0x0B, 0xFF, 0x75, 0x00, 0x30, 0x30, 0x30, 0x30, 0x04, 0x02, 0x08, 0x08,
+	0x08, 0x09, 'T', 'i', 'z', 'e', 'n', 'R', 'T'};
+static uint8_t g_adv_reboot_qc_adv[RMC_ADV_REBOOT_DATA_LEN] = {
+	0x02, 0x01, 0x02, 0x1B, 0xFF, 0x75, 0x00, 0x42, 0x1F, 0x70, 0x00, 0x01};
+
+static pthread_t g_adv_reboot_thread;
+static bool g_adv_reboot_thread_created = false;
+static volatile bool g_adv_reboot_running = false;
+static bool g_adv_reboot_broadcasting = false;
+static uint32_t g_adv_reboot_reinit_delay_s = RMC_ADV_REBOOT_REINIT_DELAY_S;
+static uint32_t g_adv_reboot_qc_delay_s = RMC_ADV_REBOOT_QC_DELAY_S;
+static uint32_t g_adv_reboot_start_count = 0;
+static uint32_t g_adv_reboot_fail_count = 0;
+static uint64_t g_adv_reboot_max_ms = 0;
+
+#ifdef CONFIG_WIFI_MANAGER
+static void adv_reboot_wifi_cb(wifi_manager_cb_msg_s msg, void *arg)
+{
+	(void)msg;
+	(void)arg;
+}
+
+static wifi_manager_cb_s g_adv_reboot_wifi_cb = {
+	adv_reboot_wifi_cb, /* sta_connected */
+	adv_reboot_wifi_cb, /* sta_disconnected */
+	adv_reboot_wifi_cb, /* softap_sta_joined */
+	adv_reboot_wifi_cb, /* softap_sta_left */
+	adv_reboot_wifi_cb, /* scan_ap_done */
+};
+#endif
+
+/* system tick based: CLOCK_MONOTONIC is not enabled in every config */
+static uint64_t adv_reboot_get_time_ms(void)
+{
+	return (uint64_t)TICK2MSEC((uint64_t)clock_systimer());
+}
+
+static bool adv_reboot_sleep_ms(uint32_t ms)
+{
+	while (ms > 0 && g_adv_reboot_running) {
+		uint32_t step = ms > 100 ? 100 : ms;
+		usleep(step * 1000);
+		ms -= step;
+	}
+	return g_adv_reboot_running;
+}
+
+/* Same sequence as ble_multi_adv.c change_ble_adv(): stop -> data -> resp -> interval -> type -> start */
+static void adv_reboot_change_adv(rmc_adv_reboot_index_e index)
+{
+	ble_result_e ret;
+	ble_data data = {
+		0,
+	};
+	const char *name = index == RMC_ADV_REBOOT_ONBOARDING ? "onboarding" : "quick_control";
+
+	if (g_adv_reboot_broadcasting) {
+		ret = ble_server_stop_adv();
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_SERVER_TAG, "adv reboot: stop_adv fail[%d]\n", ret);
+		}
+		g_adv_reboot_broadcasting = false;
+	}
+
+	data.data = index == RMC_ADV_REBOOT_ONBOARDING ? g_adv_reboot_onboarding_adv : g_adv_reboot_qc_adv;
+	data.length = RMC_ADV_REBOOT_DATA_LEN;
+	ret = ble_server_set_adv_data(&data);
+	if (ret != BLE_MANAGER_SUCCESS) {
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot: set_adv_data fail[%d]\n", ret);
+	}
+
+	if (index == RMC_ADV_REBOOT_ONBOARDING) {
+		data.data = g_adv_reboot_onboarding_resp;
+		data.length = RMC_ADV_REBOOT_DATA_LEN;
+		ret = ble_server_set_adv_resp(&data);
+		if (ret != BLE_MANAGER_SUCCESS) {
+			RMC_LOG(RMC_SERVER_TAG, "adv reboot: set_adv_resp fail[%d]\n", ret);
+		}
+	}
+
+	ret = ble_server_set_adv_interval(index == RMC_ADV_REBOOT_ONBOARDING ? RMC_ADV_REBOOT_ONBOARDING_INTERVAL : RMC_ADV_REBOOT_QC_INTERVAL);
+	if (ret != BLE_MANAGER_SUCCESS) {
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot: set_adv_interval fail[%d]\n", ret);
+	}
+
+	ble_adv_type_e type = BLE_ADV_TYPE_NONCONN_IND;
+	if (index == RMC_ADV_REBOOT_ONBOARDING) {
+		bool is_active = false;
+		ble_manager_conn_is_any_active(&is_active);
+		type = is_active ? BLE_ADV_TYPE_NONCONN_IND : BLE_ADV_TYPE_IND;
+	}
+	ret = ble_server_set_adv_type(type, NULL);
+	if (ret != BLE_MANAGER_SUCCESS) {
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot: set_adv_type fail[%d]\n", ret);
+	}
+
+	uint64_t started_ms = adv_reboot_get_time_ms();
+	ret = ble_server_start_adv();
+	uint64_t elapsed_ms = adv_reboot_get_time_ms() - started_ms;
+	g_adv_reboot_start_count++;
+	if (elapsed_ms > g_adv_reboot_max_ms) {
+		g_adv_reboot_max_ms = elapsed_ms;
+	}
+	if (ret == BLE_MANAGER_SUCCESS) {
+		g_adv_reboot_broadcasting = true;
+	} else {
+		g_adv_reboot_fail_count++;
+	}
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: start_adv[%u] %s ret[%d] time[%llums] max[%llums] fail[%u]\n",
+			g_adv_reboot_start_count, name, ret, (unsigned long long)elapsed_ms,
+			(unsigned long long)g_adv_reboot_max_ms, g_adv_reboot_fail_count);
+
+	if (ret != BLE_MANAGER_SUCCESS) {
+		/* Same recovery as the DA patch in rtw_ble_server_start_adv(): reboot when adv does not start */
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot: start_adv fail, reboot\n");
+		sleep(1);
+		boardctl(BOARDIOC_RESET, 0);
+	}
+}
+
+static void *adv_reboot_worker(void *arg)
+{
+	(void)arg;
+	ble_result_e ret;
+	uint8_t mac[BLE_BD_ADDR_MAX_LEN] = {
+		0,
+	};
+
+#ifdef CONFIG_WIFI_MANAGER
+	/* 1. set_app_main: wifi_manager_initialize() before ble_manager_init(), BLE init needs WiFi on (no AP connection) */
+	wifi_manager_result_e wret = wifi_manager_init(&g_adv_reboot_wifi_cb);
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: wifi_manager_init ret[%d]\n", wret);
+#endif
+
+	/* 2. set_app_main: ble_manager_init(NULL) only to print the BLE MAC */
+	ret = ble_manager_init(NULL);
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: init with NULL ret[%d]\n", ret);
+	if (ret != BLE_MANAGER_SUCCESS && ret != BLE_MANAGER_ALREADY_WORKING) {
+		goto adv_reboot_exit;
+	}
+	ret = ble_manager_get_mac_addr(mac);
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: BLE Mac Address : %02x:%02x:%02x:%02x:%02x:%02x ret[%d]\n",
+			mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ret);
+
+	/* 3. iotivity CAInitLEGattServer: already working -> deinit -> init with GATT profile */
+	if (!adv_reboot_sleep_ms(g_adv_reboot_reinit_delay_s * 1000)) {
+		goto adv_reboot_exit;
+	}
+	ret = ble_manager_init(&server_config);
+	if (ret == BLE_MANAGER_ALREADY_WORKING) {
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot: init is already done. Attempting deinit.\n");
+		ret = ble_manager_deinit();
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot: deinit ret[%d]\n", ret);
+		ret = ble_manager_init(&server_config);
+	}
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: init with config ret[%d]\n", ret);
+
+	/* 4. ocf_manager_init end: onboarding adv only */
+	if (!adv_reboot_sleep_ms(RMC_ADV_REBOOT_OCF_DELAY_MS)) {
+		goto adv_reboot_exit;
+	}
+	ret = ble_server_set_adv_tx_power(RMC_ADV_REBOOT_TX_POWER);
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: set_adv_tx_power ret[%d]\n", ret);
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: onboarding adv initiate\n");
+	adv_reboot_change_adv(RMC_ADV_REBOOT_ONBOARDING);
+
+	/* 5. cloud sign-in success: alternate onboarding / quick control like ble_multi_adv_task() */
+	if (g_adv_reboot_qc_delay_s == 0 || !adv_reboot_sleep_ms(g_adv_reboot_qc_delay_s * 1000)) {
+		goto adv_reboot_wait;
+	}
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: quick control activate\n");
+	while (g_adv_reboot_running) {
+		adv_reboot_change_adv(RMC_ADV_REBOOT_ONBOARDING);
+		if (!adv_reboot_sleep_ms(RMC_ADV_REBOOT_ONBOARDING_AIR_TIME_MS)) {
+			break;
+		}
+		adv_reboot_change_adv(RMC_ADV_REBOOT_QUICK_CONTROL);
+		adv_reboot_sleep_ms(RMC_ADV_REBOOT_QC_AIR_TIME_MS);
+	}
+
+adv_reboot_wait:
+	while (adv_reboot_sleep_ms(1000)) {
+	}
+
+adv_reboot_exit:
+	if (g_adv_reboot_broadcasting) {
+		ble_server_stop_adv();
+		g_adv_reboot_broadcasting = false;
+	}
+	RMC_LOG(RMC_SERVER_TAG, "adv reboot: exit, start_adv count[%u] fail[%u] max[%llums]\n",
+			g_adv_reboot_start_count, g_adv_reboot_fail_count, (unsigned long long)g_adv_reboot_max_ms);
+	return NULL;
+}
+
+static void adv_reboot_stop(void)
+{
+	if (!g_adv_reboot_thread_created) {
+		return;
+	}
+	g_adv_reboot_running = false;
+	pthread_join(g_adv_reboot_thread, NULL);
+	g_adv_reboot_thread_created = false;
+}
+
+static bool adv_reboot_start(uint32_t reinit_delay_s, uint32_t qc_delay_s)
+{
+	if (g_adv_reboot_thread_created) {
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot is already running\n");
+		return false;
+	}
+
+	g_adv_reboot_reinit_delay_s = reinit_delay_s;
+	g_adv_reboot_qc_delay_s = qc_delay_s;
+	g_adv_reboot_start_count = 0;
+	g_adv_reboot_fail_count = 0;
+	g_adv_reboot_max_ms = 0;
+	g_adv_reboot_broadcasting = false;
+	g_adv_reboot_running = true;
+	int ret = pthread_create(&g_adv_reboot_thread, NULL, adv_reboot_worker, NULL);
+	if (ret != 0) {
+		RMC_LOG(RMC_SERVER_TAG, "adv reboot worker create fail[%d]\n", ret);
+		g_adv_reboot_running = false;
+		return false;
+	}
+	g_adv_reboot_thread_created = true;
+	return true;
+}
+
+/* Called at boot as the user entry point (ENTRY_BLE_RMC): same BLE sequence as the DA product boot */
+static void adv_reboot_autostart(void)
+{
+	RMC_LOG(RMC_SERVER_TAG, "Adv Reboot Autostart, reinit delay : %ds, quick control delay : %ds\n",
+			RMC_ADV_REBOOT_REINIT_DELAY_S, RMC_ADV_REBOOT_QC_DELAY_S);
+	if (!adv_reboot_start(RMC_ADV_REBOOT_REINIT_DELAY_S, RMC_ADV_REBOOT_QC_DELAY_S)) {
+		return;
+	}
+	/* keep the entry task alive while the worker runs */
+	while (g_adv_reboot_thread_created) {
+		sleep(1);
+	}
+}
+
 static int ble_connect_common(ble_client_ctx *ctx, ble_addr *addr, bool is_auto)
 {
 	ble_result_e ret = BLE_MANAGER_FAIL;
@@ -580,6 +846,10 @@ int ble_rmc_main(int argc, char *argv[])
 	ble_result_e ret = BLE_MANAGER_FAIL;
 
 	if (argc < 2) {
+		/* os_bringup starts CONFIG_USER_ENTRYPOINT as the "appmain" task */
+		if (argv[0] != NULL && strncmp(argv[0], "appmain", 8) == 0) {
+			adv_reboot_autostart();
+		}
 		return 0;
 	}
 
@@ -630,6 +900,7 @@ int ble_rmc_main(int argc, char *argv[])
 	}
 
 	if (strncmp(argv[1], "deinit", 7) == 0) {
+		adv_reboot_stop();
 		ret = ble_manager_deinit();
 		ctx_count = 0;
 		RMC_LOG(RMC_CLIENT_TAG, "deinit done[%d]\n", ret);
@@ -1035,6 +1306,33 @@ int ble_rmc_main(int argc, char *argv[])
 			printf("%s: pthread_create failed, status=%d\n", __func__, ret);
 		} else {
 			pthread_detach(pid);
+		}
+	}
+
+	/*
+	 * [ Adv after reboot ] Usage :
+	 * Reproduces the DA boot sequence: init(NULL) + MAC print -> deinit/init with GATT profile
+	 * -> onboarding adv -> onboarding/quick control adv alternation
+	 * TASH>> ble_rmc advreboot [reinit_delay] [qc_delay]
+	 * ( reinit_delay : optional. seconds, default : 15s )
+	 * ( qc_delay : optional. seconds after onboarding adv, default : 8s, 0 : no quick control )
+	 * With ENTRY_BLE_RMC, the sequence also runs automatically on every boot with the default delays.
+	 * If start_adv fails, the board reboots like the DA product.
+	 * TASH>> ble_rmc advreboot stop
+	 */
+	if (strncmp(argv[1], "advreboot", 10) == 0) {
+		if (argc == 3 && strncmp(argv[2], "stop", 5) == 0) {
+			adv_reboot_stop();
+		} else {
+			int reinit_delay = argc >= 3 ? atoi(argv[2]) : RMC_ADV_REBOOT_REINIT_DELAY_S;
+			int qc_delay = argc >= 4 ? atoi(argv[3]) : RMC_ADV_REBOOT_QC_DELAY_S;
+			if (reinit_delay < 0 || qc_delay < 0) {
+				RMC_LOG(RMC_SERVER_TAG, "adv reboot delay is invalid[%d][%d]\n", reinit_delay, qc_delay);
+				goto ble_rmc_done;
+			}
+			RMC_LOG(RMC_SERVER_TAG, "Adv Reboot Start, reinit delay : %ds, quick control delay : %ds\n",
+					reinit_delay, qc_delay);
+			adv_reboot_start(reinit_delay, qc_delay);
 		}
 	}
 

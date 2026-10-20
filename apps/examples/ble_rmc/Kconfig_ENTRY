@@ -1,0 +1,3 @@
+config ENTRY_BLE_RMC
+	bool "BLE remote controller example"
+	depends on EXAMPLES_BLE_RMC

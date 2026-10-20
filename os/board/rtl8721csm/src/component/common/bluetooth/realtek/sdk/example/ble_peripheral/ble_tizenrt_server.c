@@ -18,6 +18,9 @@
 #include "ble_tizenrt_scatternet_link_mgr.h"
 #include "ble_tizenrt_app.h"
 #include <os_mem.h>
+#ifdef CONFIG_LIB_BOARDCTL
+#include <sys/boardctl.h>
+#endif
 
 bool is_server_init = false;
 bool g_slave_link = false; //indicate if slave link connection is made
@@ -673,6 +676,10 @@ trble_result_e rtw_ble_server_start_adv(void)
         if(max_count == 20)
         {
             dbg("loop count reaches %d \n", max_count);
+#ifdef CONFIG_LIB_BOARDCTL
+            os_delay(1000);
+            boardctl(BOARDIOC_RESET, 0);
+#endif
             return TRBLE_FAIL;
         }
         le_get_gap_param(GAP_PARAM_DEV_STATE , &new_state);

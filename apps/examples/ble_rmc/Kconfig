@@ -9,3 +9,7 @@ config EXAMPLES_BLE_RMC
 	depends on BLE_MANAGER
 	---help---
 		Enable BLE remote controller
+
+config USER_ENTRYPOINT
+	string
+	default "ble_rmc_main" if ENTRY_BLE_RMC
